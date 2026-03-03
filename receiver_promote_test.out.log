@@ -1,0 +1,45 @@
+Receiver listening on 0.0.0.0:9000...
+Beacon Broadcast: epoch=1772562377 oid=0798b2f8
+Network PPS: 1 | EER: 0.00
+[DISCOVERY] Dormant OID accepted: c1932639
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+[PROMOTION] Dormant OID elevated to Active: c1932639
+Interest Verified from 127.0.0.1:58742
+Network PPS: 1 | EER: 1982.95
+Beacon Broadcast: epoch=1772562382 oid=ea6a6655
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Beacon Broadcast: epoch=1772562387 oid=d537da95
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Beacon Broadcast: epoch=1772562392 oid=062d55d2
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Beacon Broadcast: epoch=1772562397 oid=e6f9ee4b
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Beacon Broadcast: epoch=1772562402 oid=70ea13de
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Beacon Broadcast: epoch=1772562407 oid=620f1b08
+Network PPS: 1 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00
+Network PPS: 0 | EER: 0.00

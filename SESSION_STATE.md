@@ -14,6 +14,7 @@ Last updated: 2026-03-03
 ### Implemented
 - UDP sender/receiver/discover controller in `main.go`.
 - Pull injector mode in `main.go` (`-mode pull -oid <64hex>`).
+- Automated promotion test mode in `main.go` (`-mode promote_test`).
 - Beacon + interest packet structures and parse/serialize paths in `qrof/packet.go`.
 - Admission + inclusion logic in `qrof/admission.go`.
 - PoD verification/solver (Argon2id + SHAKE256) in `qrof/economy.go`.
@@ -34,6 +35,7 @@ Last updated: 2026-03-03
   - dormant PoD salt verification using stored dormant `LeafHash`
   - `PromoteDormant` hook with `[PROMOTION] Dormant OID elevated to Active: ...`
   - full OID discovery sender logging for manual pull targeting
+  - automated discovery->interest sequence for deterministic validation (`promote_test`)
 
 ### Known Gaps (code truth, not target spec)
 - No ML-DSA verification path is implemented.

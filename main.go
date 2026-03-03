@@ -22,7 +22,7 @@ type leafWindow struct {
 }
 
 func main() {
-	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, or pull")
+	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, pull, or promote_test")
 	target := flag.String("target", "localhost:9000", "target UDP address")
 	targetOID := flag.String("oid", "", "target OID (64 hex chars) for pull mode")
 	difficulty := flag.Uint("difficulty", uint(qrof.DifficultyInterest), "PoD difficulty for interests")
@@ -45,8 +45,12 @@ func main() {
 		if err := runPull(*target, *targetOID, uint32(*difficulty)); err != nil {
 			log.Fatalf("pull failed: %v", err)
 		}
+	case "promote_test":
+		if err := runPromoteTest(*target, uint32(*difficulty)); err != nil {
+			log.Fatalf("promote_test failed: %v", err)
+		}
 	default:
-		log.Fatalf("invalid mode %q (expected receiver, sender, discover, or pull)", *mode)
+		log.Fatalf("invalid mode %q (expected receiver, sender, discover, pull, or promote_test)", *mode)
 	}
 }
 
@@ -313,6 +317,40 @@ func runPull(target string, oidHex string, difficulty uint32) error {
 		fmt.Printf("Pull Interest Sent: oid=%x nonce=%d\n", targetOID[:4], capsule.Nonce)
 		return nil
 	}
+}
+
+func runPromoteTest(target string, difficulty uint32) error {
+	targetAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return err
+	}
+
+	sendConn, err := net.DialUDP("udp", nil, targetAddr)
+	if err != nil {
+		return err
+	}
+	defer sendConn.Close()
+
+	beacon := randomBeacon()
+	beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyDiscovery)
+
+	if _, err := sendConn.Write(beacon.Serialize()); err != nil {
+		return err
+	}
+	fmt.Printf("PromoteTest Beacon Sent: oid=%x pow=%d\n", beacon.OID, beacon.PoW)
+
+	time.Sleep(3 * time.Second)
+
+	salt := qrof.DeriveSalt(beacon.LeafHash, beacon.OID)
+	capsule := qrof.SolveA_PoD(beacon.OID, salt, difficulty)
+	interest := qrof.InterestPacket{DemandCapsule: capsule}
+
+	if _, err := sendConn.Write(interest.Serialize()); err != nil {
+		return err
+	}
+	fmt.Printf("PromoteTest Interest Sent: oid=%x nonce=%d\n", beacon.OID[:4], capsule.Nonce)
+
+	return nil
 }
 
 func randomBeacon() qrof.Beacon {
