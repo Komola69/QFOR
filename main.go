@@ -141,8 +141,16 @@ func runReceiver(difficulty uint32) error {
 			continue
 		}
 
-		if _, ok := qrof.ParseBeacon(frame); ok {
-			// Receiver can hear local broadcasts; ignore for this control path.
+		if beacon, ok := qrof.ParseBeacon(frame); ok {
+			// Split beacon handling into solicited (PIT-matching) and
+			// unsolicited discovery traffic.
+			if gradients.HasPendingInterest(beacon.OID) {
+				continue
+			}
+			if qrof.VerifyDiscoveryPoW(beacon) {
+				gradients.AddDormant(beacon.OID)
+				fmt.Printf("[DISCOVERY] Dormant OID accepted: %x\n", beacon.OID[:4])
+			}
 			continue
 		}
 

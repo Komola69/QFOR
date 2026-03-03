@@ -57,6 +57,10 @@ func VerifyBeaconPoW(beacon Beacon, difficulty uint32) bool {
 	return beaconWorkValue(beacon, beacon.PoW) < difficulty
 }
 
+func VerifyDiscoveryPoW(beacon Beacon) bool {
+	return VerifyBeaconPoW(beacon, DifficultyDiscovery)
+}
+
 func SolveBeaconPoW(beacon Beacon, difficulty uint32) uint32 {
 	var nonce uint32
 	for {

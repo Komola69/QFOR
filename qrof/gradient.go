@@ -13,6 +13,8 @@ const (
 	gradientHalfLifeSeconds    = 10.0
 	gradientWeightCap          = 2.0
 	gradientEvictionWeight     = 0.1
+	dormantDecayMultiplier     = 3.0
+	dormantInitialWeight       = 1.0
 )
 
 type OIDEntry struct {
@@ -21,11 +23,18 @@ type OIDEntry struct {
 	LastSeen  time.Time
 }
 
+type DormantEntry struct {
+	Weight   float64
+	LastSeen time.Time
+}
+
 type GradientTable struct {
 	mu        sync.RWMutex
 	entries   map[[32]byte]OIDEntry
 	pitMu     sync.RWMutex
 	pit       map[[32]byte]time.Time
+	dormantMu sync.Mutex
+	dormant   map[[32]byte]*DormantEntry
 	decayOnce sync.Once
 }
 
@@ -33,6 +42,7 @@ func NewGradientTable() *GradientTable {
 	g := &GradientTable{
 		entries: make(map[[32]byte]OIDEntry),
 		pit:     make(map[[32]byte]time.Time),
+		dormant: make(map[[32]byte]*DormantEntry),
 	}
 	g.DecayLoop()
 	return g
@@ -87,12 +97,14 @@ func (g *GradientTable) DecayLoop() {
 			for now := range ticker.C {
 				elapsedSeconds := now.Sub(lastTick).Seconds()
 				lastTick = now
-				decayFactor := math.Exp(-math.Ln2 * elapsedSeconds / gradientHalfLifeSeconds)
+				activeDecayFactor := math.Exp(-math.Ln2 * elapsedSeconds / gradientHalfLifeSeconds)
+				dormantDecayFactor := math.Exp(-(dormantDecayMultiplier * math.Ln2 * elapsedSeconds) / gradientHalfLifeSeconds)
 
+				// Phase A: decay active entries and collect evictions.
 				evicted := make([][32]byte, 0)
 				g.mu.Lock()
 				for oid, entry := range g.entries {
-					entry.Weight *= decayFactor
+					entry.Weight *= activeDecayFactor
 					if entry.Weight < gradientEvictionWeight {
 						delete(g.entries, oid)
 						evicted = append(evicted, oid)
@@ -102,16 +114,33 @@ func (g *GradientTable) DecayLoop() {
 				}
 				g.mu.Unlock()
 
+				for _, oid := range evicted {
+					fmt.Printf("!!! EVICTED: %x\n", oid[:4])
+				}
+
+				// Phase B: PIT cleanup for evicted active entries.
 				if len(evicted) > 0 {
 					g.pitMu.Lock()
 					for _, oid := range evicted {
 						delete(g.pit, oid)
 					}
 					g.pitMu.Unlock()
+				}
 
-					for _, oid := range evicted {
-						fmt.Printf("!!! EVICTED: %x\n", oid[:4])
+				// Phase C: decay dormant entries 3x faster than active entries.
+				dormantEvicted := make([][32]byte, 0)
+				g.dormantMu.Lock()
+				for oid, entry := range g.dormant {
+					entry.Weight *= dormantDecayFactor
+					if entry.Weight < gradientEvictionWeight {
+						delete(g.dormant, oid)
+						dormantEvicted = append(dormantEvicted, oid)
 					}
+				}
+				g.dormantMu.Unlock()
+
+				for _, oid := range dormantEvicted {
+					fmt.Printf("[DISCOVERY] !!! DORMANT EVICTED: %x\n", oid[:4])
 				}
 			}
 		}()
@@ -132,6 +161,25 @@ func (g *GradientTable) RemovePendingInterest(oid [32]byte) {
 	g.pitMu.Lock()
 	delete(g.pit, oid)
 	g.pitMu.Unlock()
+}
+
+func (g *GradientTable) AddDormant(oid [32]byte) {
+	now := time.Now()
+
+	g.dormantMu.Lock()
+	defer g.dormantMu.Unlock()
+
+	entry, ok := g.dormant[oid]
+	if !ok {
+		g.dormant[oid] = &DormantEntry{
+			Weight:   dormantInitialWeight,
+			LastSeen: now,
+		}
+		return
+	}
+
+	entry.Weight = dormantInitialWeight
+	entry.LastSeen = now
 }
 
 func (g *GradientTable) HasPendingInterest(oid [32]byte) bool {
