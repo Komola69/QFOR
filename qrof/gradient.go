@@ -1,6 +1,7 @@
 package qrof
 
 import (
+	"math"
 	"sync"
 	"time"
 )
@@ -8,25 +9,30 @@ import (
 const (
 	gradientPotentialThreshold = 1.0
 	gradientDecayTick          = 1 * time.Second
-	gradientDecayStep          = 0.02
-	gradientForgetPotential    = 10.0
+	gradientHalfLifeSeconds    = 10.0
+	gradientMinWeight          = 1e-6
 )
 
-type GradientEntry struct {
+type OIDEntry struct {
 	Potential float64
+	Weight    float64
 	LastSeen  time.Time
 }
 
 type GradientTable struct {
-	mu      sync.RWMutex
-	entries map[[32]byte]GradientEntry
+	mu        sync.RWMutex
+	entries   map[[32]byte]OIDEntry
+	pitMu     sync.RWMutex
+	pit       map[[32]byte]time.Time
+	decayOnce sync.Once
 }
 
 func NewGradientTable() *GradientTable {
 	g := &GradientTable{
-		entries: make(map[[32]byte]GradientEntry),
+		entries: make(map[[32]byte]OIDEntry),
+		pit:     make(map[[32]byte]time.Time),
 	}
-	g.DecayGradients()
+	g.DecayLoop()
 	return g
 }
 
@@ -38,8 +44,9 @@ func (g *GradientTable) UpdateGradient(oid [32]byte, signalStrength float64) {
 
 	entry, ok := g.entries[oid]
 	if !ok {
-		g.entries[oid] = GradientEntry{
+		g.entries[oid] = OIDEntry{
 			Potential: signalStrength,
+			Weight:    1.0,
 			LastSeen:  now,
 		}
 		return
@@ -49,6 +56,7 @@ func (g *GradientTable) UpdateGradient(oid [32]byte, signalStrength float64) {
 	if signalStrength < entry.Potential {
 		entry.Potential = signalStrength
 	}
+	entry.Weight += 1.0
 	entry.LastSeen = now
 	g.entries[oid] = entry
 }
@@ -61,29 +69,67 @@ func (g *GradientTable) GetBestInterface(oid [32]byte) bool {
 	if !ok {
 		return false
 	}
-	return entry.Potential < gradientPotentialThreshold
+	return entry.Potential < gradientPotentialThreshold && entry.Weight > gradientMinWeight
+}
+
+func (g *GradientTable) DecayLoop() {
+	g.decayOnce.Do(func() {
+		go func() {
+			ticker := time.NewTicker(gradientDecayTick)
+			defer ticker.Stop()
+
+			lastTick := time.Now()
+			for now := range ticker.C {
+				elapsedSeconds := now.Sub(lastTick).Seconds()
+				lastTick = now
+				decayFactor := math.Exp(-math.Ln2 * elapsedSeconds / gradientHalfLifeSeconds)
+
+				g.mu.Lock()
+				for oid, entry := range g.entries {
+					entry.Weight *= decayFactor
+					if entry.Weight < gradientMinWeight {
+						delete(g.entries, oid)
+						continue
+					}
+					g.entries[oid] = entry
+				}
+				g.mu.Unlock()
+			}
+		}()
+	})
 }
 
 func (g *GradientTable) DecayGradients() {
-	go func() {
-		ticker := time.NewTicker(gradientDecayTick)
-		defer ticker.Stop()
+	g.DecayLoop()
+}
 
-		for now := range ticker.C {
-			g.mu.Lock()
-			for oid, entry := range g.entries {
-				if now.Sub(entry.LastSeen) < gradientDecayTick {
-					continue
-				}
+func (g *GradientTable) AddPendingInterest(oid [32]byte) {
+	g.pitMu.Lock()
+	g.pit[oid] = time.Now()
+	g.pitMu.Unlock()
+}
 
-				entry.Potential += gradientDecayStep
-				if entry.Potential >= gradientForgetPotential {
-					delete(g.entries, oid)
-					continue
-				}
-				g.entries[oid] = entry
-			}
-			g.mu.Unlock()
-		}
-	}()
+func (g *GradientTable) RemovePendingInterest(oid [32]byte) {
+	g.pitMu.Lock()
+	delete(g.pit, oid)
+	g.pitMu.Unlock()
+}
+
+func (g *GradientTable) HasPendingInterest(oid [32]byte) bool {
+	g.pitMu.RLock()
+	_, ok := g.pit[oid]
+	g.pitMu.RUnlock()
+	return ok
+}
+
+// Demand-triggered verification gate: avoid expensive signature work
+// unless there is matching demand in the PIT.
+func (g *GradientTable) VerifyBeaconIfDemanded(beacon Beacon, verifyMLDSA func(Beacon) bool) bool {
+	if !g.HasPendingInterest(beacon.OID) {
+		return false
+	}
+	if verifyMLDSA == nil {
+		return true
+	}
+	return verifyMLDSA(beacon)
 }
