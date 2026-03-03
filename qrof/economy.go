@@ -1,6 +1,7 @@
 package qrof
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"math"
@@ -15,6 +16,10 @@ const (
 
 	podScratchSize = 4 * 1024
 )
+
+func DeriveNamespace(ns string) [32]byte {
+	return sha256.Sum256([]byte(ns))
+}
 
 func VerifyA_PoD(interest DemandCapsule, salt [32]byte) bool {
 	return VerifyA_PoDWithDifficulty(interest, salt, DifficultyInterest)

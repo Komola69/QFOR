@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/hex"
 	"flag"
@@ -25,28 +26,29 @@ func main() {
 	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, pull, or promote_test")
 	target := flag.String("target", "localhost:9000", "target UDP address")
 	targetOID := flag.String("oid", "", "target OID (64 hex chars) for pull mode")
+	namespaceFlag := flag.String("namespace", "global", "Network isolation scope")
 	difficulty := flag.Uint("difficulty", uint(qrof.DifficultyInterest), "PoD difficulty for interests")
 	flag.Parse()
 
 	switch *mode {
 	case "receiver":
-		if err := runReceiver(uint32(*difficulty)); err != nil {
+		if err := runReceiver(uint32(*difficulty), *namespaceFlag); err != nil {
 			log.Fatalf("receiver failed: %v", err)
 		}
 	case "sender":
-		if err := runSender(*target, uint32(*difficulty)); err != nil {
+		if err := runSender(*target, uint32(*difficulty), *namespaceFlag); err != nil {
 			log.Fatalf("sender failed: %v", err)
 		}
 	case "discover":
-		if err := runDiscover(*target); err != nil {
+		if err := runDiscover(*target, *namespaceFlag); err != nil {
 			log.Fatalf("discover failed: %v", err)
 		}
 	case "pull":
-		if err := runPull(*target, *targetOID, uint32(*difficulty)); err != nil {
+		if err := runPull(*target, *targetOID, uint32(*difficulty), *namespaceFlag); err != nil {
 			log.Fatalf("pull failed: %v", err)
 		}
 	case "promote_test":
-		if err := runPromoteTest(*target, uint32(*difficulty)); err != nil {
+		if err := runPromoteTest(*target, uint32(*difficulty), *namespaceFlag); err != nil {
 			log.Fatalf("promote_test failed: %v", err)
 		}
 	default:
@@ -54,7 +56,7 @@ func main() {
 	}
 }
 
-func runReceiver(difficulty uint32) error {
+func runReceiver(difficulty uint32, namespace string) error {
 	listenConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 9000})
 	if err != nil {
 		return err
@@ -69,6 +71,7 @@ func runReceiver(difficulty uint32) error {
 	defer broadcastConn.Close()
 
 	gradients := qrof.NewGradientTable()
+	nsHash := qrof.DeriveNamespace(namespace)
 	var salts leafWindow
 
 	var pps uint64
@@ -101,7 +104,8 @@ func runReceiver(difficulty uint32) error {
 			rotateSaltWindow(&salts, beacon.LeafHash)
 			gradients.AddPendingInterest(beacon.OID)
 
-			if _, err := broadcastConn.Write(beacon.Serialize()); err != nil {
+			payload := addNamespacePrefix(nsHash, beacon.Serialize())
+			if _, err := broadcastConn.Write(payload); err != nil {
 				fmt.Printf("Beacon broadcast failed: %v\n", err)
 			} else {
 				fmt.Printf("Beacon Broadcast: epoch=%d oid=%x\n", beacon.Epoch, beacon.OID[:4])
@@ -120,9 +124,19 @@ func runReceiver(difficulty uint32) error {
 		if n <= 0 {
 			continue
 		}
+		if n < len(nsHash) {
+			continue
+		}
+		if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+			continue
+		}
+
+		frame := buf[len(nsHash):n]
+		if len(frame) == 0 {
+			continue
+		}
 		atomic.AddUint64(&pps, 1)
 
-		frame := buf[:n]
 		if interest, ok := qrof.ParseInterestPacket(frame); ok {
 			oid := interest.DemandCapsule.OID
 			inPIT := gradients.HasPendingInterest(oid)
@@ -182,7 +196,7 @@ func runReceiver(difficulty uint32) error {
 	}
 }
 
-func runSender(target string, difficulty uint32) error {
+func runSender(target string, difficulty uint32, namespace string) error {
 	listenConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 9000})
 	if err != nil {
 		return err
@@ -201,6 +215,7 @@ func runSender(target string, difficulty uint32) error {
 	defer sendConn.Close()
 
 	gradients := qrof.NewGradientTable()
+	nsHash := qrof.DeriveNamespace(namespace)
 	buf := make([]byte, 64*1024)
 
 	for {
@@ -211,8 +226,14 @@ func runSender(target string, difficulty uint32) error {
 		if n <= 0 {
 			continue
 		}
+		if n < len(nsHash) {
+			continue
+		}
+		if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+			continue
+		}
 
-		beacon, ok := qrof.ParseBeacon(buf[:n])
+		beacon, ok := qrof.ParseBeacon(buf[len(nsHash):n])
 		if !ok {
 			continue
 		}
@@ -231,7 +252,7 @@ func runSender(target string, difficulty uint32) error {
 			DemandCapsule: capsule,
 		}
 
-		if _, err := sendConn.Write(interest.Serialize()); err != nil {
+		if _, err := sendConn.Write(addNamespacePrefix(nsHash, interest.Serialize())); err != nil {
 			return err
 		}
 
@@ -241,7 +262,7 @@ func runSender(target string, difficulty uint32) error {
 	}
 }
 
-func runDiscover(target string) error {
+func runDiscover(target string, namespace string) error {
 	targetAddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
 		return err
@@ -252,12 +273,13 @@ func runDiscover(target string) error {
 		return err
 	}
 	defer sendConn.Close()
+	nsHash := qrof.DeriveNamespace(namespace)
 
 	for {
 		beacon := randomBeacon()
 		beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyDiscovery)
 
-		if _, err := sendConn.Write(beacon.Serialize()); err != nil {
+		if _, err := sendConn.Write(addNamespacePrefix(nsHash, beacon.Serialize())); err != nil {
 			return err
 		}
 		fmt.Printf("Discovery Beacon Sent: oid=%x pow=%d\n", beacon.OID, beacon.PoW)
@@ -265,11 +287,12 @@ func runDiscover(target string) error {
 	}
 }
 
-func runPull(target string, oidHex string, difficulty uint32) error {
+func runPull(target string, oidHex string, difficulty uint32, namespace string) error {
 	targetOID, err := parseOIDHex(oidHex)
 	if err != nil {
 		return err
 	}
+	nsHash := qrof.DeriveNamespace(namespace)
 
 	listenConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 9000})
 	if err != nil {
@@ -298,8 +321,14 @@ func runPull(target string, oidHex string, difficulty uint32) error {
 		if n <= 0 {
 			continue
 		}
+		if n < len(nsHash) {
+			continue
+		}
+		if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+			continue
+		}
 
-		beacon, ok := qrof.ParseBeacon(buf[:n])
+		beacon, ok := qrof.ParseBeacon(buf[len(nsHash):n])
 		if !ok || beacon.OID != targetOID {
 			continue
 		}
@@ -311,7 +340,7 @@ func runPull(target string, oidHex string, difficulty uint32) error {
 		capsule := qrof.SolveA_PoD(targetOID, salt, difficulty)
 		interest := qrof.InterestPacket{DemandCapsule: capsule}
 
-		if _, err := sendConn.Write(interest.Serialize()); err != nil {
+		if _, err := sendConn.Write(addNamespacePrefix(nsHash, interest.Serialize())); err != nil {
 			return err
 		}
 		fmt.Printf("Pull Interest Sent: oid=%x nonce=%d\n", targetOID[:4], capsule.Nonce)
@@ -319,7 +348,7 @@ func runPull(target string, oidHex string, difficulty uint32) error {
 	}
 }
 
-func runPromoteTest(target string, difficulty uint32) error {
+func runPromoteTest(target string, difficulty uint32, namespace string) error {
 	targetAddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
 		return err
@@ -330,11 +359,12 @@ func runPromoteTest(target string, difficulty uint32) error {
 		return err
 	}
 	defer sendConn.Close()
+	nsHash := qrof.DeriveNamespace(namespace)
 
 	beacon := randomBeacon()
 	beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyDiscovery)
 
-	if _, err := sendConn.Write(beacon.Serialize()); err != nil {
+	if _, err := sendConn.Write(addNamespacePrefix(nsHash, beacon.Serialize())); err != nil {
 		return err
 	}
 	fmt.Printf("PromoteTest Beacon Sent: oid=%x pow=%d\n", beacon.OID, beacon.PoW)
@@ -345,7 +375,7 @@ func runPromoteTest(target string, difficulty uint32) error {
 	capsule := qrof.SolveA_PoD(beacon.OID, salt, difficulty)
 	interest := qrof.InterestPacket{DemandCapsule: capsule}
 
-	if _, err := sendConn.Write(interest.Serialize()); err != nil {
+	if _, err := sendConn.Write(addNamespacePrefix(nsHash, interest.Serialize())); err != nil {
 		return err
 	}
 	fmt.Printf("PromoteTest Interest Sent: oid=%x nonce=%d\n", beacon.OID[:4], capsule.Nonce)
@@ -406,4 +436,11 @@ func parseOIDHex(input string) ([32]byte, error) {
 
 	copy(oid[:], raw)
 	return oid, nil
+}
+
+func addNamespacePrefix(nsHash [32]byte, payload []byte) []byte {
+	out := make([]byte, len(nsHash)+len(payload))
+	copy(out, nsHash[:])
+	copy(out[len(nsHash):], payload)
+	return out
 }
