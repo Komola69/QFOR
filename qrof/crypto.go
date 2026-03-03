@@ -4,6 +4,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/binary"
 	"errors"
 	"fmt"
 	"os"
@@ -41,10 +42,23 @@ func DeriveOID(pub ed25519.PublicKey) [32]byte {
 	return sha256.Sum256(pub)
 }
 
-func BuildDataSigningMessage(oid [32]byte, payload []byte) []byte {
-	msg := make([]byte, len(oid)+len(payload))
-	copy(msg, oid[:])
-	copy(msg[len(oid):], payload)
+func BuildDataSigningMessage(oid [32]byte, chunkIndex uint16, totalChunks uint16, payload []byte) []byte {
+	payloadHash := sha256.Sum256(payload)
+
+	msg := make([]byte, 32+2+2+32)
+
+	offset := 0
+	copy(msg[offset:], oid[:])
+	offset += 32
+
+	binary.BigEndian.PutUint16(msg[offset:], chunkIndex)
+	offset += 2
+
+	binary.BigEndian.PutUint16(msg[offset:], totalChunks)
+	offset += 2
+
+	copy(msg[offset:], payloadHash[:])
+
 	return msg
 }
 

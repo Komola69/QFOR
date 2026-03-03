@@ -10,6 +10,8 @@ import (
 const (
 	MTU        = 800
 	HeaderSize = 64
+	// Chunk payload cap keeps data frames safely under typical UDP MTU.
+	MaxChunkPayloadSize = 1000
 
 	qrofPreamble0 = 0x51
 	qrofPreamble1 = 0x52
@@ -21,8 +23,8 @@ const (
 
 const (
 	beaconFrameLen   = 2 + 1 + 32 + 32 + 8 + 4 + 4
-	interestFrameLen = 2 + 1 + 32 + 4 + 32
-	dataFrameMinLen  = 2 + 1 + 32 + 32 + 2 + 2
+	interestFrameLen = 2 + 1 + 32 + 2 + 2 + 4 + 32
+	dataFrameMinLen  = 2 + 1 + 32 + 32 + 2 + 2 + 2
 )
 
 var defaultPreamble = [2]byte{qrofPreamble0, qrofPreamble1}
@@ -52,6 +54,8 @@ type DemandCapsule struct {
 
 type InterestPacket struct {
 	Preamble      [2]byte
+	ChunkIndex    uint16
+	TotalChunks   uint16
 	DemandCapsule DemandCapsule
 }
 
@@ -59,6 +63,8 @@ type DataPacket struct {
 	Preamble  [2]byte
 	OID       [32]byte
 	PubKey    ed25519.PublicKey
+	ChunkIndex  uint16
+	TotalChunks uint16
 	Signature []byte
 	Payload   []byte
 }
@@ -130,8 +136,10 @@ func (i InterestPacket) Serialize() []byte {
 	copy(frame[0:2], preamble[:])
 	frame[2] = FrameTypeInterest
 	copy(frame[3:35], i.DemandCapsule.OID[:])
-	binary.BigEndian.PutUint32(frame[35:39], i.DemandCapsule.Nonce)
-	copy(frame[39:71], i.DemandCapsule.SaltedPoD[:])
+	binary.BigEndian.PutUint16(frame[35:37], i.ChunkIndex)
+	binary.BigEndian.PutUint16(frame[37:39], i.TotalChunks)
+	binary.BigEndian.PutUint32(frame[39:43], i.DemandCapsule.Nonce)
+	copy(frame[43:75], i.DemandCapsule.SaltedPoD[:])
 	return frame
 }
 
@@ -146,8 +154,10 @@ func ParseInterestPacket(frame []byte) (InterestPacket, bool) {
 
 	i.Preamble = [2]byte{frame[0], frame[1]}
 	copy(i.DemandCapsule.OID[:], frame[3:35])
-	i.DemandCapsule.Nonce = binary.BigEndian.Uint32(frame[35:39])
-	copy(i.DemandCapsule.SaltedPoD[:], frame[39:71])
+	i.ChunkIndex = binary.BigEndian.Uint16(frame[35:37])
+	i.TotalChunks = binary.BigEndian.Uint16(frame[37:39])
+	i.DemandCapsule.Nonce = binary.BigEndian.Uint32(frame[39:43])
+	copy(i.DemandCapsule.SaltedPoD[:], frame[43:75])
 	return i, true
 }
 
@@ -163,22 +173,28 @@ func (d DataPacket) Serialize() []byte {
 	}
 
 	payloadLen := len(d.Payload)
-	if payloadLen > 0xFFFF {
-		payloadLen = 0xFFFF
+	if payloadLen > MaxChunkPayloadSize {
+		payloadLen = MaxChunkPayloadSize
 	}
 	sigLen := len(d.Signature)
 	if sigLen > 0xFFFF {
 		sigLen = 0xFFFF
 	}
+	totalChunks := d.TotalChunks
+	if totalChunks == 0 {
+		totalChunks = 1
+	}
 
-	frame := make([]byte, 2+1+32+32+2+sigLen+2+payloadLen)
+	frame := make([]byte, 2+1+32+32+2+2+2+sigLen+2+payloadLen)
 	copy(frame[0:2], preamble[:])
 	frame[2] = FrameTypeData
 	copy(frame[3:35], d.OID[:])
 	copy(frame[35:67], pub)
-	binary.BigEndian.PutUint16(frame[67:69], uint16(sigLen))
-	copy(frame[69:69+sigLen], d.Signature[:sigLen])
-	offset := 69 + sigLen
+	binary.BigEndian.PutUint16(frame[67:69], d.ChunkIndex)
+	binary.BigEndian.PutUint16(frame[69:71], totalChunks)
+	binary.BigEndian.PutUint16(frame[71:73], uint16(sigLen))
+	copy(frame[73:73+sigLen], d.Signature[:sigLen])
+	offset := 73 + sigLen
 	binary.BigEndian.PutUint16(frame[offset:offset+2], uint16(payloadLen))
 	copy(frame[offset+2:], d.Payload[:payloadLen])
 	return frame
@@ -198,16 +214,21 @@ func ParseDataPacket(frame []byte) (*DataPacket, error) {
 	}
 	copy(d.OID[:], frame[3:35])
 	copy(d.PubKey, frame[35:67])
+	d.ChunkIndex = binary.BigEndian.Uint16(frame[67:69])
+	d.TotalChunks = binary.BigEndian.Uint16(frame[69:71])
 
-	sigLen := int(binary.BigEndian.Uint16(frame[67:69]))
-	if len(frame) < 69+sigLen+2 {
+	sigLen := int(binary.BigEndian.Uint16(frame[71:73]))
+	if len(frame) < 73+sigLen+2 {
 		return nil, errors.New("bounds error: signature length exceeds buffer")
 	}
 	d.Signature = make([]byte, sigLen)
-	copy(d.Signature, frame[69:69+sigLen])
+	copy(d.Signature, frame[73:73+sigLen])
 
-	offset := 69 + sigLen
+	offset := 73 + sigLen
 	payloadLen := int(binary.BigEndian.Uint16(frame[offset : offset+2]))
+	if payloadLen > MaxChunkPayloadSize {
+		return nil, errors.New("bounds error: payload exceeds max chunk size")
+	}
 	if len(frame) < offset+2+payloadLen {
 		return nil, errors.New("bounds error: payload length exceeds buffer")
 	}

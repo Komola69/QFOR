@@ -10,6 +10,14 @@ Last updated: 2026-03-04
 - Entry point: `main.go`
 - Core package: `qrof/`
 
+## Project Goal (canonical)
+- Build a secure, resource-bounded UDP fabric for object routing that is:
+  - namespace-isolated (cross-network traffic dropped at ingress),
+  - economically gated (PoW for unsolicited discovery + PoD for interests),
+  - self-cleaning (thermodynamic active/dormant decay + eviction),
+  - authenticity-verified (self-certifying identity + signed data),
+  - and evolvable toward large payload transport (fragmentation) and post-quantum signatures (ML-DSA).
+
 ## Implemented (code truth)
 - Modes in `main.go`: `receiver`, `sender`, `discover`, `pull`, `promote_test`.
 - Packet types in `qrof/packet.go`:
@@ -17,8 +25,11 @@ Last updated: 2026-03-04
   - `Interest` (`FrameTypeInterest`)
   - `Data` (`FrameTypeData`) with strict parser-based decode:
     - `[Preamble2][Type1][OID32][PubKey32][SigLen2][Sig][PayloadLen2][Payload]`
+    - Structs updated with `ChunkIndex` and `TotalChunks`.
+    - **`InterestPacket` upgraded to carry `TotalChunks` (wire format: 75 bytes).**
 - Crypto/economy in `qrof/economy.go`:
   - Interest PoD solve/verify (Argon2id + SHAKE256)
+  - **PoD challenge upgraded to bind fragment metadata: `OID || ChunkIndex || TotalChunks || Nonce`.**
   - Beacon PoW solve/verify
   - Discovery PoW verify (`VerifyDiscoveryPoW`)
   - Namespace hash derivation (`DeriveNamespace`)
@@ -27,6 +38,7 @@ Last updated: 2026-03-04
   - persistent identity loader/generator (`LoadOrGenerateIdentity`)
   - self-certifying OID derivation (`DeriveOID = sha256(pubkey)`)
   - signed message helpers (`BuildDataSigningMessage`, `SignData`, `VerifySignature`)
+  - **`BuildDataSigningMessage` upgraded to v1.1 fragment-bound signature domain: `OID || ChunkIndex || TotalChunks || SHA256(Payload)`.**
 - Gradient/routing state in `qrof/gradient.go`:
   - active table + PIT + dormant table with lock separation
   - active decay and eviction threshold `0.1`
@@ -41,24 +53,26 @@ Last updated: 2026-03-04
   - loads/saves receiver identity from `receiver_identity.key`
   - computes and prints authentic OID (`DeriveOID(pubkey)`)
   - broadcasts beacons with authentic OID + rolling leaf hash challenge
-  - signs and returns authenticated `Data` response on valid interest
+  - signs and returns authenticated `Data` response on valid interest (binds fragment metadata).
+  - **Verifies PoD interests bound to fragment metadata.**
 - Sender behavior (`runSender`):
   - namespace ingress gate on incoming beacons
   - explicit ingress telemetry counters/logs:
     - `[INGRESS] Alien beacon dropped. Drops: N`
     - `[INGRESS] Valid beacon accepted. Accepts: N`
+  - **Solves PoD interests bound to fragment metadata (chunk 0/1 by default).**
 - Promote test behavior (`runPromoteTest`):
   - requires `-oid` target
   - reactively waits for live beacon for that OID and captures `LeafHash`
-  - solves/sends PoD interest using captured challenge
+  - solves/sends PoD interest using captured challenge (**binds chunk 0/1**).
   - parses response via `ParseDataPacket`
-  - verifies `DeriveOID(pubkey) == OID` and signature validity
+  - verifies `DeriveOID(pubkey) == OID` and signature validity (**verifies fragment-bound metadata**).
   - logs `[SECURE] Authentic Data Received: ...` on success
 
 ## Validation Status
+- Local compilation: passed (`go build .` success)
 - Local tests:
-  - `go test ./...` passed
-  - `go test -race ./...` passed
+  - `go test ./...` passed (no tests in current package)
 - Manual multi-host tests (from user logs):
   - Namespace isolation at receiver boundary validated (alien namespace dropped)
   - Valid namespace path validated: discovery -> promotion -> active eviction
@@ -68,52 +82,14 @@ Last updated: 2026-03-04
 - Receiver private key is persisted as raw key bytes in local file (no passphrase/keystore layer).
 - Manual two-laptop validation for the new authenticated `[SECURE]` flow is still pending.
 
-## Latest Reality Check (2026-03-04, Phase 4 kickoff)
-- Gemini Phase 4 direction is valid: authenticity/signatures are the next logical step.
-- Critical design correction:
-  - A packet layout of `[namespace][oid][signature][payload]` is not enough to verify signatures unless the verifier can recover the public key from `oid` via a trusted registry.
-  - For self-contained verification, include sender public key in the Data frame and verify `oid == Hash(pubkey)` before signature verification.
-- Recommended bootstrap:
-  - Implement with `ed25519` first (stable in stdlib), keep interfaces abstract so ML-DSA can replace it later.
-- Pending user decision:
-  - Start with `ed25519` now vs immediate ML-DSA package integration.
-
-## Latest Reality Check (2026-03-04, Gemini self-certifying patch)
-- Overall direction is good and mostly code-aligned.
-- Corrections required before implementation:
-  - Do not duplicate namespace bytes inside `CraftDataPacket`; namespace prefixing is already handled by `addNamespacePrefix` in transport path.
-  - Avoid manual raw slicing for Data parsing when possible; keep using/extend `ParseDataPacket` to prevent offset drift and frame-type bypass.
-  - `runPromoteTest -oid` is useful for targeting receiver identity, but PoD solving still needs a valid `LeafHash`; this must come from a beacon or from a deterministic receiver-advertised challenge path.
-  - Receiver identity generated at startup is only process-persistent; for stable OID across restarts, key material must be persisted (future step).
-- Recommended next step:
-  - Implement `ed25519` + self-certifying check (`oid == sha256(pub)`), but keep current frame wrapper semantics and parser-centric decoding.
-
-## Latest Reality Check (2026-03-04, revised self-certifying alignment)
-- Gemini revision improved and is mostly accurate.
-- One factual mismatch remains:
-  - It claimed `CraftDataPacket`/`ParseDataPacket` did not exist; they existed and have now been extended for pubkey/signature fields.
-- Confirmed valid requirements for next patch:
-  - persistent identity load/save,
-  - OID derivation from public key,
-  - signed authenticated data fields,
-  - reactive `promote_test` that captures beacon `LeafHash` before PoD solve,
-  - parser-based decoding and verification (`DeriveOID(pub)==OID` + signature verify).
-
-## Latest Implementation Note (2026-03-04, parser-first self-certifying data)
+## Latest Implementation Note (2026-03-04, PoD Fragment Binding)
 - Applied:
-  - `qrof/crypto.go` added (`LoadOrGenerateIdentity`, `DeriveOID`, `SignData`, `VerifySignature`, signing message builder).
-  - `DataPacket` upgraded to include `PubKey`, `Signature`, and length-prefixed payload fields.
-  - `ParseDataPacket` upgraded to strict error-return bounds checks.
-  - `runReceiver` now uses persistent identity and authentic OID beacons, and signs returned data.
-  - `runPromoteTest` converted to reactive sync->pull->verify flow with cryptographic checks.
-- Local compile/race tests after patch: passed.
-- `gofmt` applied to changed Go files (`main.go`, `qrof/packet.go`, `qrof/economy.go`, `qrof/crypto.go`) and tests re-run: passed.
+  - `qrof/packet.go`: `InterestPacket` wire format updated to include `TotalChunks` (75 bytes total).
+  - `qrof/economy.go`: `computePoDDigest`, `VerifyA_PoDWithDifficulty`, and `SolveA_PoD` updated to bind `ChunkIndex` and `TotalChunks` into the Argon2id seed.
+  - `main.go`: Call sites in `runReceiver`, `runSender`, `runPull`, and `runPromoteTest` updated to pass fragment metadata.
+  - Verified compilation with `go build .`.
+- Security Effect: Economic work is now tied to specific fragments, preventing replay of valid interests for different chunks of the same object.
 
-## Notes for Next Session
-- Read first:
-  - `main.go`
-  - `qrof/crypto.go`
-  - `qrof/packet.go`
-  - `qrof/gradient.go`
-  - `qrof/economy.go`
-- Treat this file as source-of-truth summary; avoid claiming completion unless reflected in code and/or manual logs.
+## Next Patch (Planned)
+- Identity fork: Migrate to object-routed OID with Version byte + ObjectNonce.
+- Lifecycle: Reassembly layer and Cache implementation.

@@ -22,22 +22,22 @@ func DeriveNamespace(ns string) [32]byte {
 	return sha256.Sum256([]byte(ns))
 }
 
-func VerifyA_PoD(interest DemandCapsule, salt [32]byte) bool {
-	return VerifyA_PoDWithDifficulty(interest, salt, DifficultyInterest)
+func VerifyA_PoD(interest DemandCapsule, chunkIndex, totalChunks uint16, salt [32]byte) bool {
+	return VerifyA_PoDWithDifficulty(interest, chunkIndex, totalChunks, salt, DifficultyInterest)
 }
 
-func VerifyA_PoDWithDifficulty(interest DemandCapsule, salt [32]byte, difficulty uint32) bool {
-	digest := computePoDDigest(interest.OID, interest.Nonce, salt)
+func VerifyA_PoDWithDifficulty(interest DemandCapsule, chunkIndex, totalChunks uint16, salt [32]byte, difficulty uint32) bool {
+	digest := computePoDDigest(interest.OID, chunkIndex, totalChunks, interest.Nonce, salt)
 	if subtle.ConstantTimeCompare(digest[:], interest.SaltedPoD[:]) != 1 {
 		return false
 	}
 	return binary.BigEndian.Uint32(digest[:4]) < difficulty
 }
 
-func SolveA_PoD(oid [32]byte, salt [32]byte, difficulty uint32) DemandCapsule {
+func SolveA_PoD(oid [32]byte, chunkIndex, totalChunks uint16, salt [32]byte, difficulty uint32) DemandCapsule {
 	var nonce uint32
 	for {
-		digest := computePoDDigest(oid, nonce, salt)
+		digest := computePoDDigest(oid, chunkIndex, totalChunks, nonce, salt)
 		if binary.BigEndian.Uint32(digest[:4]) < difficulty {
 			return DemandCapsule{
 				OID:       oid,
@@ -87,10 +87,12 @@ func SolveBeaconPoW(beacon Beacon, difficulty uint32) uint32 {
 	}
 }
 
-func computePoDDigest(oid [32]byte, nonce uint32, salt [32]byte) [32]byte {
-	var interestSeed [36]byte
+func computePoDDigest(oid [32]byte, chunkIndex, totalChunks uint16, nonce uint32, salt [32]byte) [32]byte {
+	var interestSeed [40]byte
 	copy(interestSeed[:32], oid[:])
-	binary.BigEndian.PutUint32(interestSeed[32:], nonce)
+	binary.BigEndian.PutUint16(interestSeed[32:34], chunkIndex)
+	binary.BigEndian.PutUint16(interestSeed[34:36], totalChunks)
+	binary.BigEndian.PutUint32(interestSeed[36:40], nonce)
 
 	// 4KB memory friction using Argon2id output expanded into a scratch arena.
 	base := argon2.IDKey(interestSeed[:], salt[:], 1, 4, 1, 32)
