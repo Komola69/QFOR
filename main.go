@@ -23,7 +23,7 @@ type leafWindow struct {
 }
 
 func main() {
-	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, pull, or promote_test")
+	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, pull, promote_test, or reassembly_test")
 	target := flag.String("target", "localhost:9000", "target UDP address")
 	targetOID := flag.String("oid", "", "target OID (64 hex chars) for pull/promote_test mode")
 	namespaceFlag := flag.String("namespace", "global", "Network isolation scope")
@@ -51,8 +51,12 @@ func main() {
 		if err := runPromoteTest(*target, *targetOID, uint32(*difficulty), *namespaceFlag); err != nil {
 			log.Fatalf("promote_test failed: %v", err)
 		}
+	case "reassembly_test":
+		if err := runReassemblyTest(*target, *namespaceFlag); err != nil {
+			log.Fatalf("reassembly_test failed: %v", err)
+		}
 	default:
-		log.Fatalf("invalid mode %q (expected receiver, sender, discover, pull, or promote_test)", *mode)
+		log.Fatalf("invalid mode %q (expected receiver, sender, discover, pull, promote_test, or reassembly_test)", *mode)
 	}
 }
 
@@ -71,6 +75,7 @@ func runReceiver(difficulty uint32, namespace string) error {
 	defer broadcastConn.Close()
 
 	gradients := qrof.NewGradientTable()
+	reassemblyTable := qrof.NewReassemblyTable()
 	nsHash := qrof.DeriveNamespace(namespace)
 	pub, priv, err := qrof.LoadOrGenerateIdentity("receiver_identity.key")
 	if err != nil {
@@ -155,6 +160,36 @@ func runReceiver(difficulty uint32, namespace string) error {
 			continue
 		}
 		atomic.AddUint64(&pps, 1)
+
+		if frame[0] == 0x51 && frame[1] == 0x52 && frame[2] == qrof.FrameTypeData {
+			if data, err := qrof.ParseDataPacket(frame); err == nil {
+				// Verify self-certifying OID
+				derived := qrof.DeriveOID(data.PubKey, data.ObjectNonce)
+				if derived != data.OID {
+					continue
+				}
+
+				// Verify Signature
+				msg := qrof.BuildDataSigningMessage(data.Version, data.OID, data.ChunkIndex, data.TotalChunks, data.Payload)
+				if !qrof.VerifySignature(data.PubKey, msg, data.Signature) {
+					continue
+				}
+
+				fmt.Printf("Chunk received: %d\n", data.ChunkIndex)
+
+				// Process for reassembly
+				full, complete := reassemblyTable.Process(data)
+				if complete {
+					fmt.Println("[REASSEMBLY COMPLETE]")
+					if string(full) == "AUTOMATED_MULTI_CHUNK_REASSEMBLY_TEST_PAYLOAD" {
+						fmt.Println("[REASSEMBLY TEST PASS]")
+					} else {
+						fmt.Printf("Payload: %s\n", string(full))
+					}
+				}
+				continue
+			}
+		}
 
 		if interest, ok := qrof.ParseInterestPacket(frame); ok {
 			oid := interest.DemandCapsule.OID
@@ -335,7 +370,7 @@ func runDiscover(target string, namespace string) error {
 		if _, err := sendConn.Write(addNamespacePrefix(nsHash, beacon.Serialize())); err != nil {
 			return err
 		}
-		fmt.Printf("Discovery Beacon Sent: oid=%x pow=%d\n", beacon.OID, beacon.PoW)
+		fmt.Printf("Discovery Beacon Sent: oid=%x pow=%d\n", beacon.OID[:4], beacon.PoW)
 		time.Sleep(5 * time.Second)
 	}
 }
@@ -363,7 +398,7 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 	}
 	defer sendConn.Close()
 
-	fmt.Printf("Pull waiting for beacon OID=%x\n", targetOID)
+	fmt.Printf("Pull waiting for beacon OID=%x\n", targetOID[:4])
 	buf := make([]byte, 64*1024)
 
 	for {
@@ -434,7 +469,7 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 	if err := listenConn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		return err
 	}
-	fmt.Printf("[SYNC] Waiting for beacon OID=%x\n", targetOID)
+	fmt.Printf("[SYNC] Waiting for beacon OID=%x\n", targetOID[:4])
 
 	buf := make([]byte, 64*1024)
 	var beacon qrof.Beacon
@@ -484,6 +519,8 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 		return err
 	}
 
+	reassembly := qrof.NewReassemblyTable()
+
 	for {
 		n, err := sendConn.Read(buf)
 		if err != nil {
@@ -508,20 +545,99 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 		}
 
 		if data.OID != targetOID {
-			return fmt.Errorf("identity mismatch: response oid=%x expected=%x", data.OID[:4], targetOID[:4])
+			continue
 		}
 		// In v1.1 we verify OID = Hash(pubkey || objectNonce)
 		derived := qrof.DeriveOID(data.PubKey, data.ObjectNonce)
 		if derived != data.OID {
-			return fmt.Errorf("identity mismatch: oid does not match pubkey+nonce hash")
+			continue
 		}
 		msg := qrof.BuildDataSigningMessage(data.Version, data.OID, data.ChunkIndex, data.TotalChunks, data.Payload)
 		if !qrof.VerifySignature(data.PubKey, msg, data.Signature) {
-			return fmt.Errorf("invalid signature")
+			continue
 		}
-		fmt.Printf("[SECURE] Authentic Data Received: %s\n", string(data.Payload))
-		return nil
+
+		fullObject, complete := reassembly.Process(data)
+		if complete {
+			fmt.Printf("[REASSEMBLY COMPLETE] Authentic Data Received: %s\n", string(fullObject))
+			return nil
+		}
 	}
+}
+
+func runReassemblyTest(target string, namespace string) error {
+	nsHash := qrof.DeriveNamespace(namespace)
+	pub, priv, err := qrof.LoadOrGenerateIdentity("tester_identity.key")
+	if err != nil {
+		return err
+	}
+
+	targetAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return err
+	}
+	sendConn, err := net.DialUDP("udp", nil, targetAddr)
+	if err != nil {
+		return err
+	}
+	defer sendConn.Close()
+
+	original := []byte("AUTOMATED_MULTI_CHUNK_REASSEMBLY_TEST_PAYLOAD")
+	totalChunks := uint16(4)
+	chunkSize := (len(original) + int(totalChunks) - 1) / int(totalChunks)
+
+	var chunks [][]byte
+	for i := 0; i < int(totalChunks); i++ {
+		start := i * chunkSize
+		end := start + chunkSize
+		if end > len(original) {
+			end = len(original)
+		}
+		chunks = append(chunks, original[start:end])
+	}
+
+	// Stable ObjectNonce for this test object
+	var objNonce [16]byte
+	mustRead(objNonce[:])
+	oid := qrof.DeriveOID(pub, objNonce)
+
+	// Shuffle order: 2, 0, 3, 1
+	order := []int{2, 0, 3, 1}
+
+	for _, i := range order {
+		err := sendChunk(sendConn, nsHash, oid, objNonce, pub, priv, chunks[i], uint16(i), totalChunks)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("Sent chunk %d/%d\n", i, totalChunks)
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	// Send duplicate chunk 1
+	fmt.Println("Sending duplicate chunk 1...")
+	_ = sendChunk(sendConn, nsHash, oid, objNonce, pub, priv, chunks[1], 1, totalChunks)
+
+	fmt.Println("[REASSEMBLY TEST SENT]")
+	return nil
+}
+
+func sendChunk(conn *net.UDPConn, nsHash [32]byte, oid [32]byte, objNonce [16]byte, pub []byte, priv []byte, payload []byte, index, total uint16) error {
+	msg := qrof.BuildDataSigningMessage(qrof.ProtocolVersion, oid, index, total, payload)
+	sig := qrof.SignData(priv, msg)
+
+	packet := qrof.DataPacket{
+		Version:     qrof.ProtocolVersion,
+		OID:         oid,
+		ObjectNonce: objNonce,
+		PubKey:      pub,
+		ChunkIndex:  index,
+		TotalChunks: total,
+		Signature:   sig,
+		Payload:     payload,
+	}
+
+	_, err := conn.Write(addNamespacePrefix(nsHash, packet.Serialize()))
+	return err
 }
 
 func randomBeacon() qrof.Beacon {
