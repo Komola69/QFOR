@@ -2,97 +2,142 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/binary"
+	"flag"
 	"fmt"
-	"runtime"
-	"sync"
-	"sync/atomic"
+	"log"
+	"net"
 	"time"
 
 	"qrof/qrof"
 )
 
 func main() {
-	workers := runtime.NumCPU()
-	runtime.GOMAXPROCS(workers)
+	mode := flag.String("mode", "receiver", "mode: receiver or sender")
+	target := flag.String("target", "localhost:9000", "target UDP address (sender mode)")
+	difficulty := flag.Uint("difficulty", 0x0FFFFFFF, "PoW admission difficulty")
+	flag.Parse()
+
+	switch *mode {
+	case "receiver":
+		if err := runReceiver(uint32(*difficulty)); err != nil {
+			log.Fatalf("receiver failed: %v", err)
+		}
+	case "sender":
+		if err := runSender(*target, uint32(*difficulty)); err != nil {
+			log.Fatalf("sender failed: %v", err)
+		}
+	default:
+		log.Fatalf("invalid mode %q (expected receiver or sender)", *mode)
+	}
+}
+
+func runReceiver(difficulty uint32) error {
+	conn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 9000})
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	fmt.Println("Listening on 0.0.0.0:9000...")
 
 	gate := qrof.AdmissionGate{
-		Difficulty: ^uint32(0) / 10,
-		QueueSize:  workers,
+		Difficulty: difficulty,
+		QueueSize:  4096,
 	}
 
-	var oid [32]byte
-	mustRead(oid[:])
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
 
-	payload := make([]byte, 1024)
-	mustRead(payload)
+	buf := make([]byte, qrof.MTU)
+	var pps uint64
 
-	foldedPath := make([]byte, 256)
-	mustRead(foldedPath)
-
-	packet := qrof.QROFPacket{
-		Preamble:    [2]byte{0x51, 0x52},
-		OID:         oid,
-		FragmentIdx: 0,
-		PoWNonce:    0,
-		MerkleProof: foldedPath,
-		Payload:     payload,
-	}
-	_ = packet.Serialize()
-
-	const duration = 10 * time.Second
-	deadline := time.Now().Add(duration)
-
-	var packetChecks uint64
-	var tier0Pass uint64
-	var tier1Pass uint64
-
-	var wg sync.WaitGroup
-	wg.Add(workers)
-	for i := 0; i < workers; i++ {
-		go func(workerID int) {
-			defer wg.Done()
-
-			nonce := uint32(workerID + 1)
-			var localChecks uint64
-			var localTier0 uint64
-			var localTier1 uint64
-
-			for {
-				if gate.MicroAdmit(packet.OID, nonce) {
-					localTier0++
-				}
-				if gate.InclusionVerify(packet.OID, packet.Payload, packet.MerkleProof) {
-					localTier1++
-				}
-
-				nonce++
-				localChecks++
-
-				if localChecks&1023 == 0 && time.Now().After(deadline) {
-					break
-				}
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
+		n, _, err := conn.ReadFromUDP(buf)
+		if err != nil {
+			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
+				return err
 			}
+		} else if n >= qrof.HeaderSize {
+			fmt.Printf("Received packet of size: %d\n", n)
 
-			atomic.AddUint64(&packetChecks, localChecks)
-			atomic.AddUint64(&tier0Pass, localTier0)
-			atomic.AddUint64(&tier1Pass, localTier1)
-		}(i)
+			var oid [32]byte
+			copy(oid[:], buf[2:34])
+			nonce := binary.BigEndian.Uint32(buf[36:40])
+			foldedPath := buf[40:qrof.HeaderSize]
+			payload := buf[qrof.HeaderSize:n]
+
+			_ = gate.MicroAdmit(oid, nonce)
+			_ = gate.InclusionVerify(oid, payload, foldedPath)
+			pps++
+		} else if n > 0 {
+			fmt.Printf("Received packet of size: %d\n", n)
+		}
+
+		select {
+		case <-ticker.C:
+			fmt.Printf("Network PPS: %d\n", pps)
+			pps = 0
+		default:
+		}
 	}
-	wg.Wait()
+}
 
-	pps := float64(packetChecks) / duration.Seconds()
-
-	fmt.Printf("Workers: %d\n", workers)
-	fmt.Printf("Packets Checked: %d\n", packetChecks)
-	fmt.Printf("Packets Per Second (PPS): %.2f\n", pps)
-	fmt.Printf("Tier 0 Passes: %d\n", tier0Pass)
-	fmt.Printf("Tier 1 Passes: %d\n", tier1Pass)
-
-	if pps >= 100000 {
-		fmt.Println("Target met: >= 100000 PPS")
-		return
+func runSender(target string, difficulty uint32) error {
+	addr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return err
 	}
-	fmt.Println("Target not met: < 100000 PPS")
+
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+
+	gate := qrof.AdmissionGate{
+		Difficulty: difficulty,
+		QueueSize:  4096,
+	}
+
+	payload := make([]byte, 512)
+	foldedPath := make([]byte, qrof.HeaderSize-40)
+	var fragmentIdx uint16
+
+	for {
+		var oid [32]byte
+		mustRead(oid[:])
+		mustRead(payload)
+		mustRead(foldedPath)
+
+		nonce := findNonce(gate, oid)
+		packet := qrof.QROFPacket{
+			Preamble:    [2]byte{0x51, 0x52},
+			OID:         oid,
+			FragmentIdx: fragmentIdx,
+			PoWNonce:    nonce,
+			MerkleProof: foldedPath,
+			Payload:     payload,
+		}
+		fragmentIdx++
+
+		frame := packet.Serialize()
+		if _, err := conn.Write(frame); err != nil {
+			return err
+		}
+
+		time.Sleep(50 * time.Microsecond)
+	}
+}
+
+func findNonce(gate qrof.AdmissionGate, oid [32]byte) uint32 {
+	var nonce uint32
+	for {
+		if gate.MicroAdmit(oid, nonce) {
+			return nonce
+		}
+		nonce++
+	}
 }
 
 func mustRead(dst []byte) {

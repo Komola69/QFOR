@@ -3,7 +3,7 @@ package qrof
 import "encoding/binary"
 
 const (
-	MTU        = 1500
+	MTU        = 800
 	HeaderSize = 64
 )
 
