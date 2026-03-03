@@ -13,6 +13,7 @@ Last updated: 2026-03-03
 
 ### Implemented
 - UDP sender/receiver/discover controller in `main.go`.
+- Pull injector mode in `main.go` (`-mode pull -oid <64hex>`).
 - Beacon + interest packet structures and parse/serialize paths in `qrof/packet.go`.
 - Admission + inclusion logic in `qrof/admission.go`.
 - PoD verification/solver (Argon2id + SHAKE256) in `qrof/economy.go`.
@@ -28,6 +29,11 @@ Last updated: 2026-03-03
   - dormant table in `qrof/gradient.go`
   - dormant 3-lambda decay and `[DISCOVERY] !!! DORMANT EVICTED` logs
   - receiver routes unsolicited beacons into dormant path after discovery PoW
+- Promotion controls:
+  - dormant-aware interest admission (`inPIT || inDormant`)
+  - dormant PoD salt verification using stored dormant `LeafHash`
+  - `PromoteDormant` hook with `[PROMOTION] Dormant OID elevated to Active: ...`
+  - full OID discovery sender logging for manual pull targeting
 
 ### Known Gaps (code truth, not target spec)
 - No ML-DSA verification path is implemented.

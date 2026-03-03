@@ -26,6 +26,7 @@ type OIDEntry struct {
 type DormantEntry struct {
 	Weight   float64
 	LastSeen time.Time
+	LeafHash [32]byte
 }
 
 type GradientTable struct {
@@ -163,7 +164,7 @@ func (g *GradientTable) RemovePendingInterest(oid [32]byte) {
 	g.pitMu.Unlock()
 }
 
-func (g *GradientTable) AddDormant(oid [32]byte) {
+func (g *GradientTable) AddDormant(oid [32]byte, leafHash [32]byte) {
 	now := time.Now()
 
 	g.dormantMu.Lock()
@@ -174,12 +175,45 @@ func (g *GradientTable) AddDormant(oid [32]byte) {
 		g.dormant[oid] = &DormantEntry{
 			Weight:   dormantInitialWeight,
 			LastSeen: now,
+			LeafHash: leafHash,
 		}
 		return
 	}
 
 	entry.Weight = dormantInitialWeight
 	entry.LastSeen = now
+	entry.LeafHash = leafHash
+}
+
+func (g *GradientTable) HasDormant(oid [32]byte) bool {
+	g.dormantMu.Lock()
+	_, ok := g.dormant[oid]
+	g.dormantMu.Unlock()
+	return ok
+}
+
+func (g *GradientTable) DormantLeafHash(oid [32]byte) ([32]byte, bool) {
+	g.dormantMu.Lock()
+	entry, ok := g.dormant[oid]
+	g.dormantMu.Unlock()
+
+	if !ok || entry == nil {
+		return [32]byte{}, false
+	}
+	return entry.LeafHash, true
+}
+
+func (g *GradientTable) PromoteDormant(oid [32]byte) {
+	g.dormantMu.Lock()
+	_, existed := g.dormant[oid]
+	if existed {
+		delete(g.dormant, oid)
+	}
+	g.dormantMu.Unlock()
+
+	if existed {
+		fmt.Printf("[PROMOTION] Dormant OID elevated to Active: %x\n", oid[:4])
+	}
 }
 
 func (g *GradientTable) HasPendingInterest(oid [32]byte) bool {

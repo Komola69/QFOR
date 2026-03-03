@@ -2,10 +2,12 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/hex"
 	"flag"
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,8 +22,9 @@ type leafWindow struct {
 }
 
 func main() {
-	mode := flag.String("mode", "receiver", "mode: receiver, sender, or discover")
+	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, or pull")
 	target := flag.String("target", "localhost:9000", "target UDP address")
+	targetOID := flag.String("oid", "", "target OID (64 hex chars) for pull mode")
 	difficulty := flag.Uint("difficulty", uint(qrof.DifficultyInterest), "PoD difficulty for interests")
 	flag.Parse()
 
@@ -38,8 +41,12 @@ func main() {
 		if err := runDiscover(*target); err != nil {
 			log.Fatalf("discover failed: %v", err)
 		}
+	case "pull":
+		if err := runPull(*target, *targetOID, uint32(*difficulty)); err != nil {
+			log.Fatalf("pull failed: %v", err)
+		}
 	default:
-		log.Fatalf("invalid mode %q (expected receiver, sender, or discover)", *mode)
+		log.Fatalf("invalid mode %q (expected receiver, sender, discover, or pull)", *mode)
 	}
 }
 
@@ -113,26 +120,39 @@ func runReceiver(difficulty uint32) error {
 
 		frame := buf[:n]
 		if interest, ok := qrof.ParseInterestPacket(frame); ok {
-			start := time.Now()
+			oid := interest.DemandCapsule.OID
+			inPIT := gradients.HasPendingInterest(oid)
+			inDormant := gradients.HasDormant(oid)
 
-			if !gradients.HasPendingInterest(interest.DemandCapsule.OID) {
-				fmt.Printf("Interest ignored from %s (OID not in PIT)\n", addr.String())
-				atomic.AddInt64(&totalVerifyNS, time.Since(start).Nanoseconds())
+			if !inPIT && !inDormant {
+				// Silently drop non-admitted interests.
 				continue
 			}
 
+			start := time.Now()
 			currentLeaf, previousLeaf := snapshotSaltWindow(&salts)
-			currentSalt := qrof.DeriveSalt(currentLeaf, interest.DemandCapsule.OID)
-			previousSalt := qrof.DeriveSalt(previousLeaf, interest.DemandCapsule.OID)
+			currentSalt := qrof.DeriveSalt(currentLeaf, oid)
+			previousSalt := qrof.DeriveSalt(previousLeaf, oid)
 
 			valid := qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, currentSalt, difficulty) ||
 				qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, previousSalt, difficulty)
+			if !valid && inDormant {
+				if dormantLeaf, ok := gradients.DormantLeafHash(oid); ok {
+					dormantSalt := qrof.DeriveSalt(dormantLeaf, oid)
+					valid = qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, dormantSalt, difficulty)
+				}
+			}
 			atomic.AddInt64(&totalVerifyNS, time.Since(start).Nanoseconds())
 
 			if valid {
 				atomic.AddUint64(&verifiedPackets, 1)
-				gradients.UpdateGradient(interest.DemandCapsule.OID, 0.1)
-				gradients.RemovePendingInterest(interest.DemandCapsule.OID)
+				if inDormant {
+					gradients.PromoteDormant(oid)
+				}
+				gradients.UpdateGradient(oid, 0.1)
+				if inPIT {
+					gradients.RemovePendingInterest(oid)
+				}
 				fmt.Printf("Interest Verified from %s\n", addr.String())
 				continue
 			}
@@ -148,7 +168,7 @@ func runReceiver(difficulty uint32) error {
 				continue
 			}
 			if qrof.VerifyDiscoveryPoW(beacon) {
-				gradients.AddDormant(beacon.OID)
+				gradients.AddDormant(beacon.OID, beacon.LeafHash)
 				fmt.Printf("[DISCOVERY] Dormant OID accepted: %x\n", beacon.OID[:4])
 			}
 			continue
@@ -236,8 +256,62 @@ func runDiscover(target string) error {
 		if _, err := sendConn.Write(beacon.Serialize()); err != nil {
 			return err
 		}
-		fmt.Printf("Discovery Beacon Sent: oid=%x pow=%d\n", beacon.OID[:4], beacon.PoW)
+		fmt.Printf("Discovery Beacon Sent: oid=%x pow=%d\n", beacon.OID, beacon.PoW)
 		time.Sleep(5 * time.Second)
+	}
+}
+
+func runPull(target string, oidHex string, difficulty uint32) error {
+	targetOID, err := parseOIDHex(oidHex)
+	if err != nil {
+		return err
+	}
+
+	listenConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 9000})
+	if err != nil {
+		return err
+	}
+	defer listenConn.Close()
+
+	targetAddr, err := net.ResolveUDPAddr("udp", target)
+	if err != nil {
+		return err
+	}
+	sendConn, err := net.DialUDP("udp", nil, targetAddr)
+	if err != nil {
+		return err
+	}
+	defer sendConn.Close()
+
+	fmt.Printf("Pull waiting for beacon OID=%x\n", targetOID)
+	buf := make([]byte, 64*1024)
+
+	for {
+		n, _, err := listenConn.ReadFromUDP(buf)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			continue
+		}
+
+		beacon, ok := qrof.ParseBeacon(buf[:n])
+		if !ok || beacon.OID != targetOID {
+			continue
+		}
+		if !qrof.VerifyDiscoveryPoW(beacon) && !qrof.VerifyBeaconPoW(beacon, qrof.DifficultyInterest) {
+			continue
+		}
+
+		salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
+		capsule := qrof.SolveA_PoD(targetOID, salt, difficulty)
+		interest := qrof.InterestPacket{DemandCapsule: capsule}
+
+		if _, err := sendConn.Write(interest.Serialize()); err != nil {
+			return err
+		}
+		fmt.Printf("Pull Interest Sent: oid=%x nonce=%d\n", targetOID[:4], capsule.Nonce)
+		return nil
 	}
 }
 
@@ -274,4 +348,24 @@ func mustRead(dst []byte) {
 	if _, err := rand.Read(dst); err != nil {
 		panic(err)
 	}
+}
+
+func parseOIDHex(input string) ([32]byte, error) {
+	var oid [32]byte
+
+	s := strings.TrimSpace(input)
+	if s == "" {
+		return oid, fmt.Errorf("missing -oid (expected 64 hex chars)")
+	}
+
+	raw, err := hex.DecodeString(s)
+	if err != nil {
+		return oid, fmt.Errorf("invalid -oid hex: %w", err)
+	}
+	if len(raw) != 32 {
+		return oid, fmt.Errorf("invalid -oid length: got %d bytes, expected 32", len(raw))
+	}
+
+	copy(oid[:], raw)
+	return oid, nil
 }
