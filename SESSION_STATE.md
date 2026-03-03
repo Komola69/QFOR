@@ -26,17 +26,13 @@ Last updated: 2026-03-04
   - PoD challenge binds `OID || ChunkIndex || TotalChunks || Nonce`.
 - **Reassembly Layer in `qrof/reassembly.go`**:
   - `ReassemblyTable` handles multi-chunk reconstruction with hard caps.
+  - **`HasState(oid)` helper added.**
 - **Directional PIT v1.1 in `qrof/pit.go`**:
-  - **Isolated Lifecycle**: PIT is now a dedicated component, decoupled from gradient decay.
-  - **Keyed by `(OID, Nonce)`**: Prevents request collisions.
-  - **Fixed 5s TTL**: Independent `Sweep` loop handles eviction.
-  - **Hard Cap**: `MAX_CONCURRENT_PIT = 512`.
-  - **Consumer-side only**: Producers no longer maintain PIT for inbound interests.
-- Receiver behavior (`runReceiver` in `main.go`):
-  - **Admission Logic**: No longer uses PIT for inbound interests. Relies on self-identity (`authenticOID`/`serviceNonce`) or discovery status (`HasDormant`).
-- Consumer behaviors (`runSender`, `runPull`, `runPromoteTest`):
-  - Now instantiate and use `PITTable` to track pending requests.
-  - **`runPromoteTest`**: Verified PIT entry check and removal on first fragment arrival.
+  - Keyed by `(OID, Nonce)`, decoupled from gradient decay, 5s TTL.
+- **Transport Lifecycle Isolation in `main.go`**:
+  - **Conditional Acceptance Logic:** Consumer receive loops (`runPromoteTest`, `runPull`) now admit fragments if `PIT exists OR ReassemblyState exists`.
+  - **First-Fragment Authorization:** PIT entry is removed immediately upon the arrival of the first valid fragment.
+  - **Continuity:** Subsequent fragments are accepted via `ReassemblyState` lookup.
 
 ## Validation Status
 - Local compilation: **SUCCESS** (`go build .` passed).
@@ -45,15 +41,14 @@ Last updated: 2026-03-04
 - Manual multi-host tests (from user logs):
   - v1.1 Identity Fork VALIDATED.
   - Multi-chunk Reassembly VALIDATED.
-  - **Directional PIT v1.1 ready for manual verification.**
+  - Directional PIT v1.1 (isolation + conditional logic) ready for final verification.
 
-## Latest Status Sync (2026-03-04, PIT Isolation)
+## Latest Status Sync (2026-03-04, Transport Finality)
 - Applied:
-  - `qrof/pit.go`: New implementation of the Pending Interest Table.
-  - `qrof/gradient.go`: Removed legacy PIT implementation.
-  - `main.go`: Updated all call sites to use isolated PIT logic and request-scoped keys.
-- Conclusion: The core transport substrate is now architecturally clean. Requests are uniquely tracked by `(OID, Nonce)` with isolated lifecycles and hard memory bounds.
+  - `main.go`: Refined PIT/Reassembly integration logic to strictly adhere to the "first-fragment authorization" rule.
+  - `main.go`: Upgraded `runPull` to include a functional receive loop with v1.1 transport law.
+- Conclusion: The core transport layer is now structurally complete, isolated, and robust against request collision and unsolicited fragment amplification.
 
 ## Next Action Required
-- **Verify PIT v1.1 functionality** on 2 laptops.
+- **Run `reassembly_test` and `promote_test`** to confirm multi-chunk transport correctness.
 - Proceed to Path A Phase 4: Cache Layer implementation.

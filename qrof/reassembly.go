@@ -112,6 +112,13 @@ func (t *ReassemblyTable) Process(pkt *DataPacket) ([]byte, bool) {
 	return nil, false
 }
 
+func (t *ReassemblyTable) HasState(oid [32]byte) bool {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	_, exists := t.states[oid]
+	return exists
+}
+
 func (t *ReassemblyTable) Sweep() {
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()

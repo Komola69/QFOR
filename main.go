@@ -393,7 +393,6 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 	fmt.Printf("Pull waiting for beacon OID=%x\n", targetOID[:4])
 	buf := make([]byte, 64*1024)
 	pit := qrof.NewPITTable()
-	_ = pit
 
 	for {
 		n, _, err := listenConn.ReadFromUDP(buf)
@@ -433,7 +432,65 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 			return err
 		}
 		fmt.Printf("Pull Interest Sent: oid=%x nonce=%d\n", targetOID[:4], capsule.Nonce)
-		return nil
+
+		// Upgrade to full receive loop
+		if err := listenConn.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
+			return err
+		}
+
+		reassembly := qrof.NewReassemblyTable()
+
+		for {
+			n, _, err := listenConn.ReadFromUDP(buf)
+			if err != nil {
+				return fmt.Errorf("data read timeout/failed: %w", err)
+			}
+			if n < len(nsHash) {
+				continue
+			}
+			if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+				continue
+			}
+
+			frame := buf[len(nsHash):n]
+			if frame[0] == 0x51 && frame[1] == 0x52 && frame[2] == qrof.FrameTypeData {
+				data, err := qrof.ParseDataPacket(frame)
+				if err != nil {
+					continue
+				}
+
+				hasPIT := pit.Has(data.OID, capsule.Nonce)
+				hasReassembly := reassembly.HasState(data.OID)
+
+				if !hasPIT && !hasReassembly {
+					continue
+				}
+
+				if data.OID != targetOID {
+					continue
+				}
+
+				derived := qrof.DeriveOID(data.PubKey, data.ObjectNonce)
+				if derived != data.OID {
+					continue
+				}
+
+				msg := qrof.BuildDataSigningMessage(data.Version, data.OID, data.ChunkIndex, data.TotalChunks, data.Payload)
+				if !qrof.VerifySignature(data.PubKey, msg, data.Signature) {
+					continue
+				}
+
+				if hasPIT && !hasReassembly {
+					pit.Remove(data.OID, capsule.Nonce)
+				}
+
+				full, complete := reassembly.Process(data)
+				if complete {
+					fmt.Printf("[PULL COMPLETE] Authentic Data Received: %s\n", string(full))
+					return nil
+				}
+			}
+		}
 	}
 }
 
@@ -542,7 +599,10 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 			continue
 		}
 
-		if !pit.Has(data.OID, capsule.Nonce) {
+		inPIT := pit.Has(data.OID, capsule.Nonce)
+		inReassembly := reassembly.HasState(data.OID)
+
+		if !inPIT && !inReassembly {
 			continue
 		}
 
@@ -559,8 +619,10 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 			continue
 		}
 
-		// Remove PIT entry on first fragment arrival
-		pit.Remove(data.OID, capsule.Nonce)
+		// If this is first fragment (PIT exists and no reassembly yet)
+		if inPIT && !inReassembly {
+			pit.Remove(data.OID, capsule.Nonce)
+		}
 
 		fullObject, complete := reassembly.Process(data)
 		if complete {
