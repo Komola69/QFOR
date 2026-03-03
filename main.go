@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"sync/atomic"
 	"time"
 
 	"qrof/qrof"
@@ -45,41 +46,53 @@ func runReceiver(difficulty uint32) error {
 		QueueSize:  4096,
 	}
 
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-
-	buf := make([]byte, qrof.MTU)
+	buf := make([]byte, 64*1024)
 	var pps uint64
 
+	go func() {
+		ticker := time.NewTicker(time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			fmt.Printf("Network PPS: %d\n", atomic.SwapUint64(&pps, 0))
+		}
+	}()
+
 	for {
-		_ = conn.SetReadDeadline(time.Now().Add(100 * time.Millisecond))
 		n, _, err := conn.ReadFromUDP(buf)
 		if err != nil {
-			if ne, ok := err.(net.Error); !ok || !ne.Timeout() {
-				return err
-			}
-		} else if n >= qrof.HeaderSize {
-			fmt.Printf("Received packet of size: %d\n", n)
-
-			var oid [32]byte
-			copy(oid[:], buf[2:34])
-			nonce := binary.BigEndian.Uint32(buf[36:40])
-			foldedPath := buf[40:qrof.HeaderSize]
-			payload := buf[qrof.HeaderSize:n]
-
-			_ = gate.MicroAdmit(oid, nonce)
-			_ = gate.InclusionVerify(oid, payload, foldedPath)
-			pps++
-		} else if n > 0 {
-			fmt.Printf("Received packet of size: %d\n", n)
+			return err
+		}
+		if n <= 0 {
+			continue
 		}
 
-		select {
-		case <-ticker.C:
-			fmt.Printf("Network PPS: %d\n", pps)
-			pps = 0
-		default:
+		fmt.Printf("Packet Received: %d\n", n)
+
+		var oid [32]byte
+		if n > 2 {
+			oidEnd := minInt(n, 34)
+			copy(oid[:], buf[2:oidEnd])
 		}
+
+		var nonce uint32
+		if n >= 40 {
+			nonce = binary.BigEndian.Uint32(buf[36:40])
+		}
+
+		var foldedPath []byte
+		if n > 40 {
+			pathEnd := minInt(n, qrof.HeaderSize)
+			foldedPath = buf[40:pathEnd]
+		}
+
+		var payload []byte
+		if n > qrof.HeaderSize {
+			payload = buf[qrof.HeaderSize:n]
+		}
+
+		_ = gate.MicroAdmit(oid, nonce)
+		_ = gate.InclusionVerify(oid, payload, foldedPath)
+		atomic.AddUint64(&pps, 1)
 	}
 }
 
@@ -125,8 +138,9 @@ func runSender(target string, difficulty uint32) error {
 		if _, err := conn.Write(frame); err != nil {
 			return err
 		}
+		fmt.Println("Packet Sent")
 
-		time.Sleep(50 * time.Microsecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 }
 
@@ -144,4 +158,11 @@ func mustRead(dst []byte) {
 	if _, err := rand.Read(dst); err != nil {
 		panic(err)
 	}
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
