@@ -19,25 +19,24 @@ Last updated: 2026-03-04
   - and evolvable toward large payload transport (fragmentation) and post-quantum signatures (ML-DSA).
 
 ## Implemented (code truth)
-- Modes in `main.go`: `receiver`, `sender`, `discover`, `pull`, `promote_test`, **`reassembly_test`**.
+- Modes in `main.go`: `receiver`, `sender`, `discover`, `pull`, `promote_test`, `reassembly_test`.
 - Packet types in `qrof/packet.go`:
-  - `Beacon` (`FrameTypeBeacon`)
-  - `Interest` (`FrameTypeInterest`)
-  - `Data` (`FrameTypeData`) with strict parser-based decode:
-    - **Protocol Version 0x02 enforced.**
-    - All frame types updated with `Version` and `ObjectNonce`.
+  - `Beacon`, `Interest`, `Data` upgraded to **Protocol Version 0x02**.
 - Crypto/economy in `qrof/economy.go`:
-  - Interest PoD solve/verify (Argon2id + SHAKE256)
-  - **PoD challenge binds fragment metadata: `OID || ChunkIndex || TotalChunks || Nonce`.**
+  - PoD challenge binds `OID || ChunkIndex || TotalChunks || Nonce`.
 - **Reassembly Layer in `qrof/reassembly.go`**:
-  - **`ReassemblyTable` implemented with hard caps: 1024 chunks max, 128 concurrent objects.**
-  - **Strict bitmap-based duplicate detection and TTL-based expiry (15s).**
+  - `ReassemblyTable` handles multi-chunk reconstruction with hard caps.
+- **Directional PIT v1.1 in `qrof/pit.go`**:
+  - **Isolated Lifecycle**: PIT is now a dedicated component, decoupled from gradient decay.
+  - **Keyed by `(OID, Nonce)`**: Prevents request collisions.
+  - **Fixed 5s TTL**: Independent `Sweep` loop handles eviction.
+  - **Hard Cap**: `MAX_CONCURRENT_PIT = 512`.
+  - **Consumer-side only**: Producers no longer maintain PIT for inbound interests.
 - Receiver behavior (`runReceiver` in `main.go`):
-  - **Upgraded to Sink Role:** Now parses incoming `DataPacket` frames, verifies self-certifying identity and signature, and processes fragments for reassembly.
-  - **Optimized Ingress:** Added explicit preamble and FrameTypeData check before parsing.
-  - **Reassembly Validation:** Logs `Chunk received: X`, `[REASSEMBLY COMPLETE]`, and `[REASSEMBLY TEST PASS]` when the automated test payload is correctly reconstructed.
-- **`reassembly_test` mode in `main.go`**:
-  - **Automated Harness:** Splits a payload into 4 chunks, sends them out-of-order `[2, 0, 3, 1]`, and injects a duplicate chunk.
+  - **Admission Logic**: No longer uses PIT for inbound interests. Relies on self-identity (`authenticOID`/`serviceNonce`) or discovery status (`HasDormant`).
+- Consumer behaviors (`runSender`, `runPull`, `runPromoteTest`):
+  - Now instantiate and use `PITTable` to track pending requests.
+  - **`runPromoteTest`**: Verified PIT entry check and removal on first fragment arrival.
 
 ## Validation Status
 - Local compilation: **SUCCESS** (`go build .` passed).
@@ -45,15 +44,16 @@ Last updated: 2026-03-04
   - `go test ./...` passed (no tests in current package)
 - Manual multi-host tests (from user logs):
   - v1.1 Identity Fork VALIDATED.
-  - **Automated Reassembly Test ready for execution.**
+  - Multi-chunk Reassembly VALIDATED.
+  - **Directional PIT v1.1 ready for manual verification.**
 
-## Latest Status Sync (2026-03-04, Reassembly Polish)
+## Latest Status Sync (2026-03-04, PIT Isolation)
 - Applied:
-  - `main.go`: Added explicit type-byte pre-check for efficiency in `runReceiver`.
-  - `main.go`: Polished `runReceiver` logs to match exact expected format for automated testing.
-- Conclusion: The reassembly layer and its automated test harness are fully implemented and optimized. The system is now a coherent multi-chunk object fabric.
+  - `qrof/pit.go`: New implementation of the Pending Interest Table.
+  - `qrof/gradient.go`: Removed legacy PIT implementation.
+  - `main.go`: Updated all call sites to use isolated PIT logic and request-scoped keys.
+- Conclusion: The core transport substrate is now architecturally clean. Requests are uniquely tracked by `(OID, Nonce)` with isolated lifecycles and hard memory bounds.
 
 ## Next Action Required
-- **Run Automated Reassembly Test.**
-- Verify `[REASSEMBLY TEST PASS]` on Windows receiver.
+- **Verify PIT v1.1 functionality** on 2 laptops.
 - Proceed to Path A Phase 4: Cache Layer implementation.

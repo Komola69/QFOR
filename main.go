@@ -126,7 +126,6 @@ func runReceiver(difficulty uint32, namespace string) error {
 			}
 			beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyInterest)
 			rotateSaltWindow(&salts, beacon.LeafHash)
-			gradients.AddPendingInterest(beacon.OID)
 
 			payload := addNamespacePrefix(nsHash, beacon.Serialize())
 			if _, err := broadcastConn.Write(payload); err != nil {
@@ -193,23 +192,20 @@ func runReceiver(difficulty uint32, namespace string) error {
 
 		if interest, ok := qrof.ParseInterestPacket(frame); ok {
 			oid := interest.DemandCapsule.OID
-			inPIT := gradients.HasPendingInterest(oid)
 			inDormant := gradients.HasDormant(oid)
+			isSelf := (oid == authenticOID && interest.ObjectNonce == serviceNonce)
 
-			if !inPIT && !inDormant {
+			if !inDormant && !isSelf {
 				// Silently drop non-admitted interests.
 				continue
 			}
 
-			// Verify Object-routed identity: OID must match pubkey + objectNonce from interest
-			// and must match our stable service object instance.
-			if interest.ObjectNonce != serviceNonce {
-				continue
-			}
-			computedOID := qrof.DeriveOID(pub, interest.ObjectNonce)
-			if computedOID != oid {
-				// We don't own this object instance
-				continue
+			// Verify Object-routed identity if we are the producer.
+			if isSelf {
+				computedOID := qrof.DeriveOID(pub, interest.ObjectNonce)
+				if computedOID != oid {
+					continue
+				}
 			}
 
 			start := time.Now()
@@ -234,9 +230,7 @@ func runReceiver(difficulty uint32, namespace string) error {
 					gradients.PromoteDormant(oid)
 				}
 				gradients.UpdateGradient(oid, 0.1)
-				if inPIT {
-					gradients.RemovePendingInterest(oid)
-				}
+
 				payload := []byte("Hello from Windows")
 				fmt.Println("[DEBUG] Preparing Data response")
 				msg := qrof.BuildDataSigningMessage(qrof.ProtocolVersion, oid, 0, 1, payload)
@@ -255,11 +249,7 @@ func runReceiver(difficulty uint32, namespace string) error {
 		}
 
 		if beacon, ok := qrof.ParseBeacon(frame); ok {
-			// Split beacon handling into solicited (PIT-matching) and
-			// unsolicited discovery traffic.
-			if gradients.HasPendingInterest(beacon.OID) {
-				continue
-			}
+			// Unsolicited discovery traffic.
 			if qrof.VerifyDiscoveryPoW(beacon) {
 				gradients.AddDormant(beacon.OID, beacon.LeafHash)
 				fmt.Printf("[DISCOVERY] Dormant OID accepted: %x\n", beacon.OID[:4])
@@ -289,7 +279,7 @@ func runSender(target string, difficulty uint32, namespace string) error {
 	}
 	defer sendConn.Close()
 
-	gradients := qrof.NewGradientTable()
+	pit := qrof.NewPITTable()
 	nsHash := qrof.DeriveNamespace(namespace)
 	buf := make([]byte, 64*1024)
 	var namespaceDrop uint64
@@ -321,17 +311,20 @@ func runSender(target string, difficulty uint32, namespace string) error {
 			continue
 		}
 
-		gradients.AddPendingInterest(beacon.OID)
-		if !gradients.VerifyBeaconIfDemanded(beacon, func(b qrof.Beacon) bool {
-			return qrof.VerifyBeaconPoW(b, qrof.DifficultyInterest)
-		}) {
-			fmt.Println("Beacon failed demand-triggered verification")
+		if pit.HasAny(beacon.OID) {
+			continue
+		}
+
+		if !qrof.VerifyBeaconPoW(beacon, qrof.DifficultyInterest) {
 			continue
 		}
 
 		salt := qrof.DeriveSalt(beacon.LeafHash, beacon.OID)
 
 		capsule := qrof.SolveA_PoD(beacon.OID, 0, 1, salt, difficulty)
+		if !pit.Add(beacon.OID, capsule.Nonce) {
+			continue
+		}
 
 		interest := qrof.InterestPacket{
 			Version:     qrof.ProtocolVersion,
@@ -344,7 +337,6 @@ func runSender(target string, difficulty uint32, namespace string) error {
 			return err
 		}
 
-		gradients.RemovePendingInterest(beacon.OID)
 		fmt.Println("Packet Sent")
 		time.Sleep(10 * time.Millisecond)
 	}
@@ -400,6 +392,8 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 
 	fmt.Printf("Pull waiting for beacon OID=%x\n", targetOID[:4])
 	buf := make([]byte, 64*1024)
+	pit := qrof.NewPITTable()
+	_ = pit
 
 	for {
 		n, _, err := listenConn.ReadFromUDP(buf)
@@ -426,6 +420,7 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 
 		salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
 		capsule := qrof.SolveA_PoD(targetOID, 0, 1, salt, difficulty)
+		pit.Add(targetOID, capsule.Nonce)
 
 		interest := qrof.InterestPacket{
 			Version:     qrof.ProtocolVersion,
@@ -503,6 +498,9 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 	salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
 	capsule := qrof.SolveA_PoD(targetOID, 0, 1, salt, difficulty)
 
+	pit := qrof.NewPITTable()
+	pit.Add(targetOID, capsule.Nonce)
+
 	interest := qrof.InterestPacket{
 		Version:     qrof.ProtocolVersion,
 		ChunkIndex:  0,
@@ -544,6 +542,10 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 			continue
 		}
 
+		if !pit.Has(data.OID, capsule.Nonce) {
+			continue
+		}
+
 		if data.OID != targetOID {
 			continue
 		}
@@ -556,6 +558,9 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 		if !qrof.VerifySignature(data.PubKey, msg, data.Signature) {
 			continue
 		}
+
+		// Remove PIT entry on first fragment arrival
+		pit.Remove(data.OID, capsule.Nonce)
 
 		fullObject, complete := reassembly.Process(data)
 		if complete {

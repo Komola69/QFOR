@@ -32,8 +32,6 @@ type DormantEntry struct {
 type GradientTable struct {
 	mu        sync.RWMutex
 	entries   map[[32]byte]OIDEntry
-	pitMu     sync.RWMutex
-	pit       map[[32]byte]time.Time
 	dormantMu sync.Mutex
 	dormant   map[[32]byte]*DormantEntry
 	decayOnce sync.Once
@@ -42,7 +40,6 @@ type GradientTable struct {
 func NewGradientTable() *GradientTable {
 	g := &GradientTable{
 		entries: make(map[[32]byte]OIDEntry),
-		pit:     make(map[[32]byte]time.Time),
 		dormant: make(map[[32]byte]*DormantEntry),
 	}
 	g.DecayLoop()
@@ -119,16 +116,7 @@ func (g *GradientTable) DecayLoop() {
 					fmt.Printf("!!! EVICTED: %x\n", oid[:4])
 				}
 
-				// Phase B: PIT cleanup for evicted active entries.
-				if len(evicted) > 0 {
-					g.pitMu.Lock()
-					for _, oid := range evicted {
-						delete(g.pit, oid)
-					}
-					g.pitMu.Unlock()
-				}
-
-				// Phase C: decay dormant entries 3x faster than active entries.
+				// Phase B: decay dormant entries 3x faster than active entries.
 				dormantEvicted := make([][32]byte, 0)
 				g.dormantMu.Lock()
 				for oid, entry := range g.dormant {
@@ -150,18 +138,6 @@ func (g *GradientTable) DecayLoop() {
 
 func (g *GradientTable) DecayGradients() {
 	g.DecayLoop()
-}
-
-func (g *GradientTable) AddPendingInterest(oid [32]byte) {
-	g.pitMu.Lock()
-	g.pit[oid] = time.Now()
-	g.pitMu.Unlock()
-}
-
-func (g *GradientTable) RemovePendingInterest(oid [32]byte) {
-	g.pitMu.Lock()
-	delete(g.pit, oid)
-	g.pitMu.Unlock()
 }
 
 func (g *GradientTable) AddDormant(oid [32]byte, leafHash [32]byte) {
@@ -214,23 +190,4 @@ func (g *GradientTable) PromoteDormant(oid [32]byte) {
 	if existed {
 		fmt.Printf("[PROMOTION] Dormant OID elevated to Active: %x\n", oid[:4])
 	}
-}
-
-func (g *GradientTable) HasPendingInterest(oid [32]byte) bool {
-	g.pitMu.RLock()
-	_, ok := g.pit[oid]
-	g.pitMu.RUnlock()
-	return ok
-}
-
-// Demand-triggered verification gate: avoid expensive signature work
-// unless there is matching demand in the PIT.
-func (g *GradientTable) VerifyBeaconIfDemanded(beacon Beacon, verifyMLDSA func(Beacon) bool) bool {
-	if !g.HasPendingInterest(beacon.OID) {
-		return false
-	}
-	if verifyMLDSA == nil {
-		return true
-	}
-	return verifyMLDSA(beacon)
 }
