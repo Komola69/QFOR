@@ -1,7 +1,9 @@
 package qrof
 
 import (
+	"crypto/ed25519"
 	"encoding/binary"
+	"errors"
 	"math"
 )
 
@@ -20,7 +22,7 @@ const (
 const (
 	beaconFrameLen   = 2 + 1 + 32 + 32 + 8 + 4 + 4
 	interestFrameLen = 2 + 1 + 32 + 4 + 32
-	dataHeaderLen    = 2 + 1 + 32 + 2
+	dataFrameMinLen  = 2 + 1 + 32 + 32 + 2 + 2
 )
 
 var defaultPreamble = [2]byte{qrofPreamble0, qrofPreamble1}
@@ -54,9 +56,11 @@ type InterestPacket struct {
 }
 
 type DataPacket struct {
-	Preamble [2]byte
-	OID      [32]byte
-	Payload  []byte
+	Preamble  [2]byte
+	OID       [32]byte
+	PubKey    ed25519.PublicKey
+	Signature []byte
+	Payload   []byte
 }
 
 func (p QROFPacket) Serialize() []byte {
@@ -153,37 +157,62 @@ func (d DataPacket) Serialize() []byte {
 		preamble = defaultPreamble
 	}
 
+	pub := d.PubKey
+	if len(pub) > ed25519.PublicKeySize {
+		pub = pub[:ed25519.PublicKeySize]
+	}
+
 	payloadLen := len(d.Payload)
 	if payloadLen > 0xFFFF {
 		payloadLen = 0xFFFF
 	}
+	sigLen := len(d.Signature)
+	if sigLen > 0xFFFF {
+		sigLen = 0xFFFF
+	}
 
-	frame := make([]byte, dataHeaderLen+payloadLen)
+	frame := make([]byte, 2+1+32+32+2+sigLen+2+payloadLen)
 	copy(frame[0:2], preamble[:])
 	frame[2] = FrameTypeData
 	copy(frame[3:35], d.OID[:])
-	binary.BigEndian.PutUint16(frame[35:37], uint16(payloadLen))
-	copy(frame[37:], d.Payload[:payloadLen])
+	copy(frame[35:67], pub)
+	binary.BigEndian.PutUint16(frame[67:69], uint16(sigLen))
+	copy(frame[69:69+sigLen], d.Signature[:sigLen])
+	offset := 69 + sigLen
+	binary.BigEndian.PutUint16(frame[offset:offset+2], uint16(payloadLen))
+	copy(frame[offset+2:], d.Payload[:payloadLen])
 	return frame
 }
 
-func ParseDataPacket(frame []byte) (DataPacket, bool) {
-	var d DataPacket
-	if len(frame) < dataHeaderLen {
-		return d, false
+func ParseDataPacket(frame []byte) (*DataPacket, error) {
+	if len(frame) < dataFrameMinLen {
+		return nil, errors.New("packet too short")
 	}
 	if frame[0] != qrofPreamble0 || frame[1] != qrofPreamble1 || frame[2] != FrameTypeData {
-		return d, false
+		return nil, errors.New("invalid preamble or frame type")
 	}
 
-	payloadLen := int(binary.BigEndian.Uint16(frame[35:37]))
-	if len(frame) < dataHeaderLen+payloadLen {
-		return d, false
+	d := &DataPacket{
+		Preamble: [2]byte{frame[0], frame[1]},
+		PubKey:   make(ed25519.PublicKey, ed25519.PublicKeySize),
 	}
-
-	d.Preamble = [2]byte{frame[0], frame[1]}
 	copy(d.OID[:], frame[3:35])
+	copy(d.PubKey, frame[35:67])
+
+	sigLen := int(binary.BigEndian.Uint16(frame[67:69]))
+	if len(frame) < 69+sigLen+2 {
+		return nil, errors.New("bounds error: signature length exceeds buffer")
+	}
+	d.Signature = make([]byte, sigLen)
+	copy(d.Signature, frame[69:69+sigLen])
+
+	offset := 69 + sigLen
+	payloadLen := int(binary.BigEndian.Uint16(frame[offset : offset+2]))
+	if len(frame) < offset+2+payloadLen {
+		return nil, errors.New("bounds error: payload length exceeds buffer")
+	}
 	d.Payload = make([]byte, payloadLen)
-	copy(d.Payload, frame[37:37+payloadLen])
-	return d, true
+	copy(d.Payload, frame[offset+2:offset+2+payloadLen])
+
+	return d, nil
 }

@@ -1,6 +1,7 @@
 package qrof
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
@@ -66,10 +67,12 @@ func VerifyDiscoveryPoW(beacon Beacon) bool {
 	return VerifyBeaconPoW(beacon, DifficultyDiscovery)
 }
 
-func CraftDataPacket(oid [32]byte, payload []byte) []byte {
+func CraftDataPacket(oid [32]byte, pub ed25519.PublicKey, sig, payload []byte) []byte {
 	packet := DataPacket{
-		OID:     oid,
-		Payload: append([]byte(nil), payload...),
+		OID:       oid,
+		PubKey:    append(ed25519.PublicKey(nil), pub...),
+		Signature: append([]byte(nil), sig...),
+		Payload:   append([]byte(nil), payload...),
 	}
 	return packet.Serialize()
 }

@@ -25,7 +25,7 @@ type leafWindow struct {
 func main() {
 	mode := flag.String("mode", "receiver", "mode: receiver, sender, discover, pull, or promote_test")
 	target := flag.String("target", "localhost:9000", "target UDP address")
-	targetOID := flag.String("oid", "", "target OID (64 hex chars) for pull mode")
+	targetOID := flag.String("oid", "", "target OID (64 hex chars) for pull/promote_test mode")
 	namespaceFlag := flag.String("namespace", "global", "Network isolation scope")
 	difficulty := flag.Uint("difficulty", uint(qrof.DifficultyInterest), "PoD difficulty for interests")
 	flag.Parse()
@@ -48,7 +48,7 @@ func main() {
 			log.Fatalf("pull failed: %v", err)
 		}
 	case "promote_test":
-		if err := runPromoteTest(*target, uint32(*difficulty), *namespaceFlag); err != nil {
+		if err := runPromoteTest(*target, *targetOID, uint32(*difficulty), *namespaceFlag); err != nil {
 			log.Fatalf("promote_test failed: %v", err)
 		}
 	default:
@@ -72,6 +72,12 @@ func runReceiver(difficulty uint32, namespace string) error {
 
 	gradients := qrof.NewGradientTable()
 	nsHash := qrof.DeriveNamespace(namespace)
+	pub, priv, err := qrof.LoadOrGenerateIdentity("receiver_identity.key")
+	if err != nil {
+		return fmt.Errorf("load/generate receiver identity: %w", err)
+	}
+	authenticOID := qrof.DeriveOID(pub)
+	fmt.Printf("Receiver Authentic OID: %x\n", authenticOID)
 	var salts leafWindow
 
 	var pps uint64
@@ -99,7 +105,14 @@ func runReceiver(difficulty uint32, namespace string) error {
 		defer ticker.Stop()
 
 		for {
-			beacon := randomBeacon()
+			var leaf [32]byte
+			mustRead(leaf[:])
+			beacon := qrof.Beacon{
+				OID:       authenticOID,
+				LeafHash:  leaf,
+				Potential: 0.5,
+				Epoch:     uint32(time.Now().Unix()),
+			}
 			beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyInterest)
 			rotateSaltWindow(&salts, beacon.LeafHash)
 			gradients.AddPendingInterest(beacon.OID)
@@ -171,7 +184,10 @@ func runReceiver(difficulty uint32, namespace string) error {
 				if inPIT {
 					gradients.RemovePendingInterest(oid)
 				}
-				data := qrof.CraftDataPacket(oid, []byte("Hello from Windows"))
+				payload := []byte("Hello from Windows")
+				msg := qrof.BuildDataSigningMessage(oid, payload)
+				sig := qrof.SignData(priv, msg)
+				data := qrof.CraftDataPacket(oid, pub, sig, payload)
 				if _, err := listenConn.WriteToUDP(addNamespacePrefix(nsHash, data), addr); err != nil {
 					fmt.Printf("Data send failed to %s: %v\n", addr.String(), err)
 				}
@@ -360,7 +376,18 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 	}
 }
 
-func runPromoteTest(target string, difficulty uint32, namespace string) error {
+func runPromoteTest(target string, oidHex string, difficulty uint32, namespace string) error {
+	targetOID, err := parseOIDHex(oidHex)
+	if err != nil {
+		return err
+	}
+
+	listenConn, err := net.ListenUDP("udp", &net.UDPAddr{IP: net.IPv4zero, Port: 9000})
+	if err != nil {
+		return err
+	}
+	defer listenConn.Close()
+
 	targetAddr, err := net.ResolveUDPAddr("udp", target)
 	if err != nil {
 		return err
@@ -373,30 +400,53 @@ func runPromoteTest(target string, difficulty uint32, namespace string) error {
 	defer sendConn.Close()
 	nsHash := qrof.DeriveNamespace(namespace)
 
-	beacon := randomBeacon()
-	beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyDiscovery)
-
-	if _, err := sendConn.Write(addNamespacePrefix(nsHash, beacon.Serialize())); err != nil {
+	if err := listenConn.SetReadDeadline(time.Now().Add(30 * time.Second)); err != nil {
 		return err
 	}
-	fmt.Printf("PromoteTest Beacon Sent: oid=%x pow=%d\n", beacon.OID, beacon.PoW)
+	fmt.Printf("[SYNC] Waiting for beacon OID=%x\n", targetOID)
 
-	time.Sleep(3 * time.Second)
+	buf := make([]byte, 64*1024)
+	var beacon qrof.Beacon
+	for {
+		n, _, err := listenConn.ReadFromUDP(buf)
+		if err != nil {
+			return fmt.Errorf("beacon sync failed: %w", err)
+		}
+		if n <= 0 || n < len(nsHash) {
+			continue
+		}
+		if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+			continue
+		}
 
-	salt := qrof.DeriveSalt(beacon.LeafHash, beacon.OID)
-	capsule := qrof.SolveA_PoD(beacon.OID, salt, difficulty)
+		parsed, ok := qrof.ParseBeacon(buf[len(nsHash):n])
+		if !ok {
+			continue
+		}
+		if parsed.OID != targetOID {
+			continue
+		}
+		if !qrof.VerifyBeaconPoW(parsed, qrof.DifficultyInterest) {
+			continue
+		}
+		beacon = parsed
+		fmt.Printf("[SYNC] Captured beacon for OID, LeafHash: %x\n", beacon.LeafHash[:4])
+		break
+	}
+
+	salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
+	capsule := qrof.SolveA_PoD(targetOID, salt, difficulty)
 	interest := qrof.InterestPacket{DemandCapsule: capsule}
 
 	if _, err := sendConn.Write(addNamespacePrefix(nsHash, interest.Serialize())); err != nil {
 		return err
 	}
-	fmt.Printf("PromoteTest Interest Sent: oid=%x nonce=%d\n", beacon.OID[:4], capsule.Nonce)
+	fmt.Printf("PromoteTest Interest Sent: oid=%x nonce=%d\n", targetOID[:4], capsule.Nonce)
 
 	if err := sendConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
 		return err
 	}
 
-	buf := make([]byte, 64*1024)
 	for {
 		n, err := sendConn.Read(buf)
 		if err != nil {
@@ -415,11 +465,23 @@ func runPromoteTest(target string, difficulty uint32, namespace string) error {
 			continue
 		}
 
-		data, ok := qrof.ParseDataPacket(frame)
-		if !ok {
+		data, err := qrof.ParseDataPacket(frame)
+		if err != nil {
 			continue
 		}
-		fmt.Printf("Data Received: %s\n", string(data.Payload))
+
+		if data.OID != targetOID {
+			return fmt.Errorf("identity mismatch: response oid=%x expected=%x", data.OID[:4], targetOID[:4])
+		}
+		derived := qrof.DeriveOID(data.PubKey)
+		if derived != data.OID {
+			return fmt.Errorf("identity mismatch: oid does not match pubkey hash")
+		}
+		msg := qrof.BuildDataSigningMessage(data.OID, data.Payload)
+		if !qrof.VerifySignature(data.PubKey, msg, data.Signature) {
+			return fmt.Errorf("invalid signature")
+		}
+		fmt.Printf("[SECURE] Authentic Data Received: %s\n", string(data.Payload))
 		return nil
 	}
 }
