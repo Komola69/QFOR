@@ -1,70 +1,67 @@
 # QROF Session State
 
-Last updated: 2026-03-03
+Last updated: 2026-03-04
 
-## User Collaboration Rule (must follow)
-- Respond as if addressing Gemini directly when discussing audits/specs.
-- Do not start editing immediately after analysis; first state the conclusion and ask the user for permission to patch.
+## Collaboration Workflow Rule
+- On every assistant reply, refresh `SESSION_STATE.md` so it reflects current code truth, test status, and validated manual outcomes.
 
 ## Current Project Snapshot
 - Language/runtime: Go (`go.mod` module `qrof`)
 - Entry point: `main.go`
 - Core package: `qrof/`
 
-### Implemented
-- UDP sender/receiver/discover controller in `main.go`.
-- Pull injector mode in `main.go` (`-mode pull -oid <64hex>`).
-- Automated promotion test mode in `main.go` (`-mode promote_test`).
-- Beacon + interest packet structures and parse/serialize paths in `qrof/packet.go`.
-- Admission + inclusion logic in `qrof/admission.go`.
-- PoD verification/solver (Argon2id + SHAKE256) in `qrof/economy.go`.
-- Gradient decay loop with exponential cooling in `qrof/gradient.go`.
-- PPS reset behavior (per-second) using `atomic.SwapUint64`.
-- Active lifecycle controls:
-  - weight cap `2.0`
-  - eviction threshold `0.1`
-  - active+PIT cleanup on eviction with `!!! EVICTED` logs
-  - fixed-window EER telemetry reset
-- Discovery isolation controls:
-  - `VerifyDiscoveryPoW(beacon)` in `qrof/economy.go`
-  - dormant table in `qrof/gradient.go`
-  - dormant 3-lambda decay and `[DISCOVERY] !!! DORMANT EVICTED` logs
-  - receiver routes unsolicited beacons into dormant path after discovery PoW
-- Promotion controls:
-  - dormant-aware interest admission (`inPIT || inDormant`)
-  - dormant PoD salt verification using stored dormant `LeafHash`
-  - `PromoteDormant` hook with `[PROMOTION] Dormant OID elevated to Active: ...`
-  - full OID discovery sender logging for manual pull targeting
-  - automated discovery->interest sequence for deterministic validation (`promote_test`)
+## Implemented (code truth)
+- Modes in `main.go`: `receiver`, `sender`, `discover`, `pull`, `promote_test`.
+- Packet types in `qrof/packet.go`:
+  - `Beacon` (`FrameTypeBeacon`)
+  - `Interest` (`FrameTypeInterest`)
+  - `Data` (`FrameTypeData`) with `Serialize`/`ParseDataPacket`
+- Crypto/economy in `qrof/economy.go`:
+  - Interest PoD solve/verify (Argon2id + SHAKE256)
+  - Beacon PoW solve/verify
+  - Discovery PoW verify (`VerifyDiscoveryPoW`)
+  - Namespace hash derivation (`DeriveNamespace`)
+  - Data packet builder (`CraftDataPacket`)
+- Gradient/routing state in `qrof/gradient.go`:
+  - active table + PIT + dormant table with lock separation
+  - active decay and eviction threshold `0.1`
+  - active cap `2.0`
+  - dormant 3-lambda decay + dormant eviction logging
+  - dormant helpers (`HasDormant`, `DormantLeafHash`, `PromoteDormant`)
+- Receiver behavior (`runReceiver`):
+  - namespace ingress gate (`n >= 32` + hash prefix match)
+  - admission gate on `inPIT || inDormant`
+  - dormant promotion on valid PoD
+  - fixed-window PPS/EER telemetry via atomic swaps
+  - sends `Data` response (`Hello from Windows`) on valid interest
+- Sender behavior (`runSender`):
+  - namespace ingress gate on incoming beacons
+  - explicit ingress telemetry counters/logs:
+    - `[INGRESS] Alien beacon dropped. Drops: N`
+    - `[INGRESS] Valid beacon accepted. Accepts: N`
+- Promote test behavior (`runPromoteTest`):
+  - sends discovery beacon
+  - waits 3s
+  - sends matching interest
+  - waits up to 5s for namespaced `Data` response and logs `Data Received: ...`
 
-### Known Gaps (code truth, not target spec)
-- No ML-DSA verification path is implemented.
-- PIT entries can still grow from periodic beacon insertion patterns if not matched; decay cleanup only removes PIT keys tied to evicted active entries.
+## Validation Status
+- Local tests:
+  - `go test ./...` passed
+  - `go test -race ./...` passed
+- Manual multi-host tests (from user logs):
+  - Namespace isolation at receiver boundary validated (alien namespace dropped)
+  - Valid namespace path validated: discovery -> promotion -> active eviction
 
-## Agreed Next Patch Set (pending user permission)
-1. `qrof/gradient.go` (done)
-- Weight cap `2.0` in `UpdateGradient`.
-- Eviction threshold `0.1`.
-- Eviction cleanup for both `entries` and `pit`.
-- Eviction logging: `!!! EVICTED: %x`.
-- Dormant map + mutex.
-- Dormant 3-lambda decay and `[DISCOVERY] !!! DORMANT EVICTED` logging.
+## Known Gaps
+- No ML-DSA signing/verification path yet.
+- `Data` payload is currently demo/plain payload (no signature/MAC/auth layer).
+- End-to-end sender ingress proof still depends on manual two-laptop telemetry runs.
 
-2. `main.go` (done)
-- PPS reset preserved.
-- EER converted to fixed-window by swapping/resetting verify counters every second.
-- Receiver unsolicited beacon routing to dormant state via discovery PoW gate.
-
-3. `qrof/economy.go` (done)
-- Added `VerifyDiscoveryPoW(beacon)` wrapper over full beacon work verification at `DifficultyDiscovery`.
-
-4. Verification status
-- `go test ./...` passed.
-- `go test -race ./...` passed.
-
-## Notes for New Session Start
-- Read this file first, then inspect:
+## Notes for Next Session
+- Read first:
   - `main.go`
+  - `qrof/packet.go`
   - `qrof/gradient.go`
   - `qrof/economy.go`
-- Avoid target-state claims unless reflected in code.
+- Treat this file as source-of-truth summary; avoid claiming completion unless reflected in code and/or manual logs.

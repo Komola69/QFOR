@@ -171,6 +171,10 @@ func runReceiver(difficulty uint32, namespace string) error {
 				if inPIT {
 					gradients.RemovePendingInterest(oid)
 				}
+				data := qrof.CraftDataPacket(oid, []byte("Hello from Windows"))
+				if _, err := listenConn.WriteToUDP(addNamespacePrefix(nsHash, data), addr); err != nil {
+					fmt.Printf("Data send failed to %s: %v\n", addr.String(), err)
+				}
 				fmt.Printf("Interest Verified from %s\n", addr.String())
 				continue
 			}
@@ -388,7 +392,36 @@ func runPromoteTest(target string, difficulty uint32, namespace string) error {
 	}
 	fmt.Printf("PromoteTest Interest Sent: oid=%x nonce=%d\n", beacon.OID[:4], capsule.Nonce)
 
-	return nil
+	if err := sendConn.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		return err
+	}
+
+	buf := make([]byte, 64*1024)
+	for {
+		n, err := sendConn.Read(buf)
+		if err != nil {
+			return fmt.Errorf("data read timeout/failed: %w", err)
+		}
+		if n < len(nsHash) {
+			continue
+		}
+		if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+			continue
+		}
+
+		frame := buf[len(nsHash):n]
+		if _, ok := qrof.ParseBeacon(frame); ok {
+			// Ignore periodic receiver broadcasts while waiting for data.
+			continue
+		}
+
+		data, ok := qrof.ParseDataPacket(frame)
+		if !ok {
+			continue
+		}
+		fmt.Printf("Data Received: %s\n", string(data.Payload))
+		return nil
+	}
 }
 
 func randomBeacon() qrof.Beacon {

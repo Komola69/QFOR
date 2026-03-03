@@ -14,11 +14,13 @@ const (
 
 	FrameTypeBeacon   = 0xB1
 	FrameTypeInterest = 0xA1
+	FrameTypeData     = 0xD1
 )
 
 const (
 	beaconFrameLen   = 2 + 1 + 32 + 32 + 8 + 4 + 4
 	interestFrameLen = 2 + 1 + 32 + 4 + 32
+	dataHeaderLen    = 2 + 1 + 32 + 2
 )
 
 var defaultPreamble = [2]byte{qrofPreamble0, qrofPreamble1}
@@ -49,6 +51,12 @@ type DemandCapsule struct {
 type InterestPacket struct {
 	Preamble      [2]byte
 	DemandCapsule DemandCapsule
+}
+
+type DataPacket struct {
+	Preamble [2]byte
+	OID      [32]byte
+	Payload  []byte
 }
 
 func (p QROFPacket) Serialize() []byte {
@@ -137,4 +145,45 @@ func ParseInterestPacket(frame []byte) (InterestPacket, bool) {
 	i.DemandCapsule.Nonce = binary.BigEndian.Uint32(frame[35:39])
 	copy(i.DemandCapsule.SaltedPoD[:], frame[39:71])
 	return i, true
+}
+
+func (d DataPacket) Serialize() []byte {
+	preamble := d.Preamble
+	if preamble == ([2]byte{}) {
+		preamble = defaultPreamble
+	}
+
+	payloadLen := len(d.Payload)
+	if payloadLen > 0xFFFF {
+		payloadLen = 0xFFFF
+	}
+
+	frame := make([]byte, dataHeaderLen+payloadLen)
+	copy(frame[0:2], preamble[:])
+	frame[2] = FrameTypeData
+	copy(frame[3:35], d.OID[:])
+	binary.BigEndian.PutUint16(frame[35:37], uint16(payloadLen))
+	copy(frame[37:], d.Payload[:payloadLen])
+	return frame
+}
+
+func ParseDataPacket(frame []byte) (DataPacket, bool) {
+	var d DataPacket
+	if len(frame) < dataHeaderLen {
+		return d, false
+	}
+	if frame[0] != qrofPreamble0 || frame[1] != qrofPreamble1 || frame[2] != FrameTypeData {
+		return d, false
+	}
+
+	payloadLen := int(binary.BigEndian.Uint16(frame[35:37]))
+	if len(frame) < dataHeaderLen+payloadLen {
+		return d, false
+	}
+
+	d.Preamble = [2]byte{frame[0], frame[1]}
+	copy(d.OID[:], frame[3:35])
+	d.Payload = make([]byte, payloadLen)
+	copy(d.Payload, frame[37:37+payloadLen])
+	return d, true
 }

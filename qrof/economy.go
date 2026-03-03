@@ -66,6 +66,14 @@ func VerifyDiscoveryPoW(beacon Beacon) bool {
 	return VerifyBeaconPoW(beacon, DifficultyDiscovery)
 }
 
+func CraftDataPacket(oid [32]byte, payload []byte) []byte {
+	packet := DataPacket{
+		OID:     oid,
+		Payload: append([]byte(nil), payload...),
+	}
+	return packet.Serialize()
+}
+
 func SolveBeaconPoW(beacon Beacon, difficulty uint32) uint32 {
 	var nonce uint32
 	for {
