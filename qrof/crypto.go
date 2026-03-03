@@ -38,26 +38,22 @@ func LoadOrGenerateIdentity(filepath string) (ed25519.PublicKey, ed25519.Private
 	return append(ed25519.PublicKey(nil), pub...), append(ed25519.PrivateKey(nil), priv...), nil
 }
 
-func DeriveOID(pub ed25519.PublicKey) [32]byte {
-	return sha256.Sum256(pub)
+func DeriveOID(pub ed25519.PublicKey, objectNonce [16]byte) [32]byte {
+	buf := make([]byte, len(pub)+16)
+	copy(buf, pub)
+	copy(buf[len(pub):], objectNonce[:])
+	return sha256.Sum256(buf)
 }
 
-func BuildDataSigningMessage(oid [32]byte, chunkIndex uint16, totalChunks uint16, payload []byte) []byte {
+func BuildDataSigningMessage(version uint8, oid [32]byte, chunkIndex uint16, totalChunks uint16, payload []byte) []byte {
 	payloadHash := sha256.Sum256(payload)
 
-	msg := make([]byte, 32+2+2+32)
-
-	offset := 0
-	copy(msg[offset:], oid[:])
-	offset += 32
-
-	binary.BigEndian.PutUint16(msg[offset:], chunkIndex)
-	offset += 2
-
-	binary.BigEndian.PutUint16(msg[offset:], totalChunks)
-	offset += 2
-
-	copy(msg[offset:], payloadHash[:])
+	msg := make([]byte, 1+32+2+2+32)
+	msg[0] = version
+	copy(msg[1:33], oid[:])
+	binary.BigEndian.PutUint16(msg[33:35], chunkIndex)
+	binary.BigEndian.PutUint16(msg[35:37], totalChunks)
+	copy(msg[37:], payloadHash[:])
 
 	return msg
 }

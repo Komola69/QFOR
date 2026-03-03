@@ -76,7 +76,11 @@ func runReceiver(difficulty uint32, namespace string) error {
 	if err != nil {
 		return fmt.Errorf("load/generate receiver identity: %w", err)
 	}
-	authenticOID := qrof.DeriveOID(pub)
+
+	var receiverObjectNonce [16]byte
+	mustRead(receiverObjectNonce[:])
+	authenticOID := qrof.DeriveOID(pub, receiverObjectNonce)
+
 	fmt.Printf("Receiver Authentic OID: %x\n", authenticOID)
 	var salts leafWindow
 
@@ -160,17 +164,25 @@ func runReceiver(difficulty uint32, namespace string) error {
 				continue
 			}
 
+			// Verify Object-routed identity: OID must match pubkey + objectNonce from interest
+			computedOID := qrof.DeriveOID(pub, interest.ObjectNonce)
+			if computedOID != oid {
+				// We don't own this object instance
+				continue
+			}
+
 			start := time.Now()
 			currentLeaf, previousLeaf := snapshotSaltWindow(&salts)
 			currentSalt := qrof.DeriveSalt(currentLeaf, oid)
 			previousSalt := qrof.DeriveSalt(previousLeaf, oid)
 
-			valid := qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, interest.ChunkIndex, interest.TotalChunks, currentSalt, difficulty) ||
-				qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, interest.ChunkIndex, interest.TotalChunks, previousSalt, difficulty)
+			// TotalChunks is always 1 for single-chunk objects in this receiver response logic
+			valid := qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, interest.ChunkIndex, 1, currentSalt, difficulty) ||
+				qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, interest.ChunkIndex, 1, previousSalt, difficulty)
 			if !valid && inDormant {
 				if dormantLeaf, ok := gradients.DormantLeafHash(oid); ok {
 					dormantSalt := qrof.DeriveSalt(dormantLeaf, oid)
-					valid = qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, interest.ChunkIndex, interest.TotalChunks, dormantSalt, difficulty)
+					valid = qrof.VerifyA_PoDWithDifficulty(interest.DemandCapsule, interest.ChunkIndex, 1, dormantSalt, difficulty)
 				}
 			}
 			atomic.AddInt64(&totalVerifyNS, time.Since(start).Nanoseconds())
@@ -185,13 +197,15 @@ func runReceiver(difficulty uint32, namespace string) error {
 					gradients.RemovePendingInterest(oid)
 				}
 				payload := []byte("Hello from Windows")
-				msg := qrof.BuildDataSigningMessage(oid, 0, 1, payload)
+				fmt.Println("[DEBUG] Preparing Data response")
+				msg := qrof.BuildDataSigningMessage(qrof.ProtocolVersion, oid, 0, 1, payload)
 				sig := qrof.SignData(priv, msg)
-				data := qrof.CraftDataPacket(oid, pub, sig, payload)
+				fmt.Println("[DEBUG] Data signed, calling CraftDataPacket")
+				data := qrof.CraftDataPacket(qrof.ProtocolVersion, oid, interest.ObjectNonce, pub, sig, payload)
 				if _, err := listenConn.WriteToUDP(addNamespacePrefix(nsHash, data), addr); err != nil {
 					fmt.Printf("Data send failed to %s: %v\n", addr.String(), err)
 				}
-				fmt.Printf("Interest Verified from %s\n", addr.String())
+				fmt.Printf("[DEBUG] Data sent, Interest Verified from %s\n", addr.String())
 				continue
 			}
 
@@ -275,10 +289,15 @@ func runSender(target string, difficulty uint32, namespace string) error {
 		}
 
 		salt := qrof.DeriveSalt(beacon.LeafHash, beacon.OID)
+
+		var objNonce [16]byte
+		mustRead(objNonce[:])
 		capsule := qrof.SolveA_PoD(beacon.OID, 0, 1, salt, difficulty)
+
 		interest := qrof.InterestPacket{
+			Version:     qrof.ProtocolVersion,
 			ChunkIndex:  0,
-			TotalChunks: 1,
+			ObjectNonce: objNonce,
 			DemandCapsule: capsule,
 		}
 
@@ -368,7 +387,16 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 
 		salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
 		capsule := qrof.SolveA_PoD(targetOID, 0, 1, salt, difficulty)
-		interest := qrof.InterestPacket{ChunkIndex: 0, TotalChunks: 1, DemandCapsule: capsule}
+
+		var objNonce [16]byte
+		mustRead(objNonce[:])
+
+		interest := qrof.InterestPacket{
+			Version:     qrof.ProtocolVersion,
+			ChunkIndex:  0,
+			ObjectNonce: objNonce,
+			DemandCapsule: capsule,
+		}
 
 		if _, err := sendConn.Write(addNamespacePrefix(nsHash, interest.Serialize())); err != nil {
 			return err
@@ -438,7 +466,16 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 
 	salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
 	capsule := qrof.SolveA_PoD(targetOID, 0, 1, salt, difficulty)
-	interest := qrof.InterestPacket{ChunkIndex: 0, TotalChunks: 1, DemandCapsule: capsule}
+
+	var objNonce [16]byte
+	mustRead(objNonce[:])
+
+	interest := qrof.InterestPacket{
+		Version:     qrof.ProtocolVersion,
+		ChunkIndex:  0,
+		ObjectNonce: objNonce,
+		DemandCapsule: capsule,
+	}
 
 	if _, err := sendConn.Write(addNamespacePrefix(nsHash, interest.Serialize())); err != nil {
 		return err
@@ -475,11 +512,12 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 		if data.OID != targetOID {
 			return fmt.Errorf("identity mismatch: response oid=%x expected=%x", data.OID[:4], targetOID[:4])
 		}
-		derived := qrof.DeriveOID(data.PubKey)
+		// In v1.1 we verify OID = Hash(pubkey || objectNonce)
+		derived := qrof.DeriveOID(data.PubKey, data.ObjectNonce)
 		if derived != data.OID {
-			return fmt.Errorf("identity mismatch: oid does not match pubkey hash")
+			return fmt.Errorf("identity mismatch: oid does not match pubkey+nonce hash")
 		}
-		msg := qrof.BuildDataSigningMessage(data.OID, data.ChunkIndex, data.TotalChunks, data.Payload)
+		msg := qrof.BuildDataSigningMessage(data.Version, data.OID, data.ChunkIndex, data.TotalChunks, data.Payload)
 		if !qrof.VerifySignature(data.PubKey, msg, data.Signature) {
 			return fmt.Errorf("invalid signature")
 		}

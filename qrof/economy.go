@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
+	"fmt"
 	"math"
 
 	"golang.org/x/crypto/argon2"
@@ -67,12 +68,17 @@ func VerifyDiscoveryPoW(beacon Beacon) bool {
 	return VerifyBeaconPoW(beacon, DifficultyDiscovery)
 }
 
-func CraftDataPacket(oid [32]byte, pub ed25519.PublicKey, sig, payload []byte) []byte {
+func CraftDataPacket(version uint8, oid [32]byte, objectNonce [16]byte, pub ed25519.PublicKey, sig, payload []byte) []byte {
+	fmt.Println("[DEBUG] CraftDataPacket invoked")
 	packet := DataPacket{
-		OID:       oid,
-		PubKey:    append(ed25519.PublicKey(nil), pub...),
-		Signature: append([]byte(nil), sig...),
-		Payload:   append([]byte(nil), payload...),
+		Version:     version,
+		OID:         oid,
+		ObjectNonce: objectNonce,
+		PubKey:      append(ed25519.PublicKey(nil), pub...),
+		ChunkIndex:  0,
+		TotalChunks: 1,
+		Signature:   append([]byte(nil), sig...),
+		Payload:     append([]byte(nil), payload...),
 	}
 	return packet.Serialize()
 }

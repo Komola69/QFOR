@@ -24,21 +24,22 @@ Last updated: 2026-03-04
   - `Beacon` (`FrameTypeBeacon`)
   - `Interest` (`FrameTypeInterest`)
   - `Data` (`FrameTypeData`) with strict parser-based decode:
-    - `[Preamble2][Type1][OID32][PubKey32][SigLen2][Sig][PayloadLen2][Payload]`
-    - Structs updated with `ChunkIndex` and `TotalChunks`.
-    - **`InterestPacket` upgraded to carry `TotalChunks` (wire format: 75 bytes).**
+    - **Upgraded to Protocol Version 0x02.**
+    - **InterestPacket (v0x02, 90 bytes):** `[Preamble 2][Type 1][Version 1][OID 32][ObjectNonce 16][ChunkIndex 2][Nonce 4][SaltedPoD 32]`.
+    - **DataPacket (v0x02, 90 bytes min):** `[Preamble 2][Type 1][Version 1][OID 32][ObjectNonce 16][PubKey 32][ChunkIndex 2][TotalChunks 2][SigLen 2][Sig][PayloadLen 2][Payload]`.
+    - **Strict Version Gating:** Packets with Version != 0x02 are dropped by parsers.
 - Crypto/economy in `qrof/economy.go`:
   - Interest PoD solve/verify (Argon2id + SHAKE256)
-  - **PoD challenge upgraded to bind fragment metadata: `OID || ChunkIndex || TotalChunks || Nonce`.**
+  - **PoD challenge binds fragment metadata: `OID || ChunkIndex || TotalChunks || Nonce`.**
   - Beacon PoW solve/verify
   - Discovery PoW verify (`VerifyDiscoveryPoW`)
   - Namespace hash derivation (`DeriveNamespace`)
-  - Data packet builder (`CraftDataPacket`) with pubkey/signature/payload fields
+  - Data packet builder (**`CraftDataPacket`**) now supports Protocol Version 0x02 and `ObjectNonce`.
 - Identity/signature in `qrof/crypto.go`:
   - persistent identity loader/generator (`LoadOrGenerateIdentity`)
-  - self-certifying OID derivation (`DeriveOID = sha256(pubkey)`)
+  - **Self-certifying OID derivation upgraded to Object-Centric Identity: `DeriveOID(pub, objectNonce) = Hash(pub || objectNonce)`.**
   - signed message helpers (`BuildDataSigningMessage`, `SignData`, `VerifySignature`)
-  - **`BuildDataSigningMessage` upgraded to v1.1 fragment-bound signature domain: `OID || ChunkIndex || TotalChunks || SHA256(Payload)`.**
+  - **`BuildDataSigningMessage` binds v1.1 versioned fragment-bound signature domain: `Version || OID || ChunkIndex || TotalChunks || SHA256(Payload)`.**
   - **`VerifySignature` now includes `[DEBUG] Signature verification FAILED` log on failure.**
 - Gradient/routing state in `qrof/gradient.go`:
   - active table + PIT + dormant table with lock separation
@@ -46,44 +47,42 @@ Last updated: 2026-03-04
   - active cap `2.0`
   - dormant 3-lambda decay + dormant eviction logging
   - dormant helpers (`HasDormant`, `DormantLeafHash`, `PromoteDormant`)
-- Receiver behavior (`runReceiver`):
+- Receiver behavior (`runReceiver` in `main.go`):
   - namespace ingress gate (`n >= 32` + hash prefix match)
   - admission gate on `inPIT || inDormant`
   - dormant promotion on valid PoD
   - fixed-window PPS/EER telemetry via atomic swaps
   - loads/saves receiver identity from `receiver_identity.key`
-  - computes and prints authentic OID (`DeriveOID(pubkey)`)
-  - broadcasts beacons with authentic OID + rolling leaf hash challenge
-  - signs and returns authenticated `Data` response on valid interest (binds fragment metadata).
-  - **Verifies PoD interests bound to fragment metadata.**
+  - **Identity Fork Phase 3 Applied:** Uses Object-routed OID for authentication. Computes `authenticOID` with a local `ObjectNonce`.
+  - broadcasts beacons with authentic OID + rolling leaf hash challenge.
+  - **Verifies Interest OID using the provided `ObjectNonce` from the packet.**
 - Sender behavior (`runSender`):
   - namespace ingress gate on incoming beacons
   - explicit ingress telemetry counters/logs:
     - `[INGRESS] Alien beacon dropped. Drops: N`
     - `[INGRESS] Valid beacon accepted. Accepts: N`
-  - **Solves PoD interests bound to fragment metadata (chunk 0/1 by default).**
+  - **Generates a random `ObjectNonce` per Interest.**
 - Promote test behavior (`runPromoteTest`):
-  - requires `-oid` target
-  - reactively waits for live beacon for that OID and captures `LeafHash`
-  - solves/sends PoD interest using captured challenge (**binds chunk 0/1**).
-  - parses response via `ParseDataPacket`
-  - verifies `DeriveOID(pubkey) == OID` and signature validity (**verifies fragment-bound metadata**).
-  - logs `[SECURE] Authentic Data Received: ...` on success
+  - **Upgraded to v1.1 Identity Law.**
+  - **Generates random `ObjectNonce` for Interest.**
+  - **Verifies received `DataPacket` OID using its `ObjectNonce` and `PubKey`.**
+  - **Binds `Version` in signature verification.**
 
 ## Validation Status
-- Local compilation: passed (`go build .` success)
+- Local compilation: **SUCCESS** (`go build .` passed).
 - Local tests:
   - `go test ./...` passed (no tests in current package)
 - Manual multi-host tests (from user logs):
-  - Namespace isolation at receiver boundary validated (alien namespace dropped)
-  - Valid namespace path validated: discovery -> promotion -> active eviction
+  - v1.0 validated. **v1.1 (Identity Fork) ready for manual verification.**
 
-## Latest Implementation Note (2026-03-04, Debug Instrumentation)
+## Latest Status Sync (2026-03-04, Identity Fork Complete)
 - Applied:
-  - `qrof/crypto.go`: `VerifySignature` updated with explicit failure logging.
-  - Verified compilation with `go build .`.
-- Goal: Distinguish between parse errors and cryptographic signature failures in the multi-host test environment.
+  - `qrof/packet.go`: v0.2 Wire Schema.
+  - `qrof/crypto.go`: v1.1 Identity Law (Object-routed OID + Versioned Signatures).
+  - `qrof/economy.go`: Updated `CraftDataPacket` to v1.1.
+  - `main.go`: Full application-level alignment with v1.1 Identity Law.
+- Conclusion: The system has successfully transitioned from producer-centric to object-centric identity. The OID now commits to both the producer and a specific object instance via a random `ObjectNonce`.
 
 ## Next Action Required
-- User to rebuild on both Windows (receiver) and Linux (sender/promote_test) machines and re-run manual tests.
-- Re-analyze output for `[DEBUG]` messages.
+- Manual verification on 2 laptops to confirm the new `promote_test` flow.
+- Proceed to Path A Phase 3: Reassembly layer implementation.

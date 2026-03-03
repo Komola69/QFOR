@@ -19,12 +19,14 @@ const (
 	FrameTypeBeacon   = 0xB1
 	FrameTypeInterest = 0xA1
 	FrameTypeData     = 0xD1
+
+	ProtocolVersion uint8 = 0x02
 )
 
 const (
 	beaconFrameLen   = 2 + 1 + 32 + 32 + 8 + 4 + 4
-	interestFrameLen = 2 + 1 + 32 + 2 + 2 + 4 + 32
-	dataFrameMinLen  = 2 + 1 + 32 + 32 + 2 + 2 + 2
+	interestFrameLen = 2 + 1 + 1 + 32 + 16 + 2 + 4 + 32
+	dataFrameMinLen  = 2 + 1 + 1 + 32 + 16 + 32 + 2 + 2 + 2
 )
 
 var defaultPreamble = [2]byte{qrofPreamble0, qrofPreamble1}
@@ -54,19 +56,22 @@ type DemandCapsule struct {
 
 type InterestPacket struct {
 	Preamble      [2]byte
+	Version       uint8
 	ChunkIndex    uint16
-	TotalChunks   uint16
+	ObjectNonce   [16]byte
 	DemandCapsule DemandCapsule
 }
 
 type DataPacket struct {
-	Preamble  [2]byte
-	OID       [32]byte
-	PubKey    ed25519.PublicKey
+	Preamble    [2]byte
+	Version     uint8
+	OID         [32]byte
+	ObjectNonce [16]byte
+	PubKey      ed25519.PublicKey
 	ChunkIndex  uint16
 	TotalChunks uint16
-	Signature []byte
-	Payload   []byte
+	Signature   []byte
+	Payload     []byte
 }
 
 func (p QROFPacket) Serialize() []byte {
@@ -135,11 +140,16 @@ func (i InterestPacket) Serialize() []byte {
 	}
 	copy(frame[0:2], preamble[:])
 	frame[2] = FrameTypeInterest
-	copy(frame[3:35], i.DemandCapsule.OID[:])
-	binary.BigEndian.PutUint16(frame[35:37], i.ChunkIndex)
-	binary.BigEndian.PutUint16(frame[37:39], i.TotalChunks)
-	binary.BigEndian.PutUint32(frame[39:43], i.DemandCapsule.Nonce)
-	copy(frame[43:75], i.DemandCapsule.SaltedPoD[:])
+	version := i.Version
+	if version == 0 {
+		version = ProtocolVersion
+	}
+	frame[3] = version
+	copy(frame[4:36], i.DemandCapsule.OID[:])
+	copy(frame[36:52], i.ObjectNonce[:])
+	binary.BigEndian.PutUint16(frame[52:54], i.ChunkIndex)
+	binary.BigEndian.PutUint32(frame[54:58], i.DemandCapsule.Nonce)
+	copy(frame[58:90], i.DemandCapsule.SaltedPoD[:])
 	return frame
 }
 
@@ -151,13 +161,17 @@ func ParseInterestPacket(frame []byte) (InterestPacket, bool) {
 	if frame[0] != qrofPreamble0 || frame[1] != qrofPreamble1 || frame[2] != FrameTypeInterest {
 		return i, false
 	}
+	if frame[3] != ProtocolVersion {
+		return i, false
+	}
 
 	i.Preamble = [2]byte{frame[0], frame[1]}
-	copy(i.DemandCapsule.OID[:], frame[3:35])
-	i.ChunkIndex = binary.BigEndian.Uint16(frame[35:37])
-	i.TotalChunks = binary.BigEndian.Uint16(frame[37:39])
-	i.DemandCapsule.Nonce = binary.BigEndian.Uint32(frame[39:43])
-	copy(i.DemandCapsule.SaltedPoD[:], frame[43:75])
+	i.Version = frame[3]
+	copy(i.DemandCapsule.OID[:], frame[4:36])
+	copy(i.ObjectNonce[:], frame[36:52])
+	i.ChunkIndex = binary.BigEndian.Uint16(frame[52:54])
+	i.DemandCapsule.Nonce = binary.BigEndian.Uint32(frame[54:58])
+	copy(i.DemandCapsule.SaltedPoD[:], frame[58:90])
 	return i, true
 }
 
@@ -185,16 +199,23 @@ func (d DataPacket) Serialize() []byte {
 		totalChunks = 1
 	}
 
-	frame := make([]byte, 2+1+32+32+2+2+2+sigLen+2+payloadLen)
+	version := d.Version
+	if version == 0 {
+		version = ProtocolVersion
+	}
+
+	frame := make([]byte, 2+1+1+32+16+32+2+2+2+sigLen+2+payloadLen)
 	copy(frame[0:2], preamble[:])
 	frame[2] = FrameTypeData
-	copy(frame[3:35], d.OID[:])
-	copy(frame[35:67], pub)
-	binary.BigEndian.PutUint16(frame[67:69], d.ChunkIndex)
-	binary.BigEndian.PutUint16(frame[69:71], totalChunks)
-	binary.BigEndian.PutUint16(frame[71:73], uint16(sigLen))
-	copy(frame[73:73+sigLen], d.Signature[:sigLen])
-	offset := 73 + sigLen
+	frame[3] = version
+	copy(frame[4:36], d.OID[:])
+	copy(frame[36:52], d.ObjectNonce[:])
+	copy(frame[52:84], pub)
+	binary.BigEndian.PutUint16(frame[84:86], d.ChunkIndex)
+	binary.BigEndian.PutUint16(frame[86:88], totalChunks)
+	binary.BigEndian.PutUint16(frame[88:90], uint16(sigLen))
+	copy(frame[90:90+sigLen], d.Signature[:sigLen])
+	offset := 90 + sigLen
 	binary.BigEndian.PutUint16(frame[offset:offset+2], uint16(payloadLen))
 	copy(frame[offset+2:], d.Payload[:payloadLen])
 	return frame
@@ -207,24 +228,29 @@ func ParseDataPacket(frame []byte) (*DataPacket, error) {
 	if frame[0] != qrofPreamble0 || frame[1] != qrofPreamble1 || frame[2] != FrameTypeData {
 		return nil, errors.New("invalid preamble or frame type")
 	}
+	if frame[3] != ProtocolVersion {
+		return nil, errors.New("protocol version mismatch")
+	}
 
 	d := &DataPacket{
 		Preamble: [2]byte{frame[0], frame[1]},
+		Version:  frame[3],
 		PubKey:   make(ed25519.PublicKey, ed25519.PublicKeySize),
 	}
-	copy(d.OID[:], frame[3:35])
-	copy(d.PubKey, frame[35:67])
-	d.ChunkIndex = binary.BigEndian.Uint16(frame[67:69])
-	d.TotalChunks = binary.BigEndian.Uint16(frame[69:71])
+	copy(d.OID[:], frame[4:36])
+	copy(d.ObjectNonce[:], frame[36:52])
+	copy(d.PubKey, frame[52:84])
+	d.ChunkIndex = binary.BigEndian.Uint16(frame[84:86])
+	d.TotalChunks = binary.BigEndian.Uint16(frame[86:88])
 
-	sigLen := int(binary.BigEndian.Uint16(frame[71:73]))
-	if len(frame) < 73+sigLen+2 {
+	sigLen := int(binary.BigEndian.Uint16(frame[88:90]))
+	if len(frame) < 90+sigLen+2 {
 		return nil, errors.New("bounds error: signature length exceeds buffer")
 	}
 	d.Signature = make([]byte, sigLen)
-	copy(d.Signature, frame[73:73+sigLen])
+	copy(d.Signature, frame[90:90+sigLen])
 
-	offset := 73 + sigLen
+	offset := 90 + sigLen
 	payloadLen := int(binary.BigEndian.Uint16(frame[offset : offset+2]))
 	if payloadLen > MaxChunkPayloadSize {
 		return nil, errors.New("bounds error: payload exceeds max chunk size")
