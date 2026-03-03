@@ -217,6 +217,8 @@ func runSender(target string, difficulty uint32, namespace string) error {
 	gradients := qrof.NewGradientTable()
 	nsHash := qrof.DeriveNamespace(namespace)
 	buf := make([]byte, 64*1024)
+	var namespaceDrop uint64
+	var namespaceAccept uint64
 
 	for {
 		n, _, err := listenConn.ReadFromUDP(buf)
@@ -227,11 +229,17 @@ func runSender(target string, difficulty uint32, namespace string) error {
 			continue
 		}
 		if n < len(nsHash) {
+			namespaceDrop++
+			fmt.Printf("[INGRESS] Alien beacon dropped. Drops: %d\n", namespaceDrop)
 			continue
 		}
 		if !bytes.Equal(buf[:len(nsHash)], nsHash[:]) {
+			namespaceDrop++
+			fmt.Printf("[INGRESS] Alien beacon dropped. Drops: %d\n", namespaceDrop)
 			continue
 		}
+		namespaceAccept++
+		fmt.Printf("[INGRESS] Valid beacon accepted. Accepts: %d\n", namespaceAccept)
 
 		beacon, ok := qrof.ParseBeacon(buf[len(nsHash):n])
 		if !ok {
