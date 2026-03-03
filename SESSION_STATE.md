@@ -39,6 +39,7 @@ Last updated: 2026-03-04
   - self-certifying OID derivation (`DeriveOID = sha256(pubkey)`)
   - signed message helpers (`BuildDataSigningMessage`, `SignData`, `VerifySignature`)
   - **`BuildDataSigningMessage` upgraded to v1.1 fragment-bound signature domain: `OID || ChunkIndex || TotalChunks || SHA256(Payload)`.**
+  - **`VerifySignature` now includes `[DEBUG] Signature verification FAILED` log on failure.**
 - Gradient/routing state in `qrof/gradient.go`:
   - active table + PIT + dormant table with lock separation
   - active decay and eviction threshold `0.1`
@@ -77,19 +78,12 @@ Last updated: 2026-03-04
   - Namespace isolation at receiver boundary validated (alien namespace dropped)
   - Valid namespace path validated: discovery -> promotion -> active eviction
 
-## Known Gaps
-- No ML-DSA signing/verification path yet (current bootstrap uses `ed25519`).
-- Receiver private key is persisted as raw key bytes in local file (no passphrase/keystore layer).
-- Manual two-laptop validation for the new authenticated `[SECURE]` flow is still pending.
-
-## Latest Implementation Note (2026-03-04, PoD Fragment Binding)
+## Latest Implementation Note (2026-03-04, Debug Instrumentation)
 - Applied:
-  - `qrof/packet.go`: `InterestPacket` wire format updated to include `TotalChunks` (75 bytes total).
-  - `qrof/economy.go`: `computePoDDigest`, `VerifyA_PoDWithDifficulty`, and `SolveA_PoD` updated to bind `ChunkIndex` and `TotalChunks` into the Argon2id seed.
-  - `main.go`: Call sites in `runReceiver`, `runSender`, `runPull`, and `runPromoteTest` updated to pass fragment metadata.
+  - `qrof/crypto.go`: `VerifySignature` updated with explicit failure logging.
   - Verified compilation with `go build .`.
-- Security Effect: Economic work is now tied to specific fragments, preventing replay of valid interests for different chunks of the same object.
+- Goal: Distinguish between parse errors and cryptographic signature failures in the multi-host test environment.
 
-## Next Patch (Planned)
-- Identity fork: Migrate to object-routed OID with Version byte + ObjectNonce.
-- Lifecycle: Reassembly layer and Cache implementation.
+## Next Action Required
+- User to rebuild on both Windows (receiver) and Linux (sender/promote_test) machines and re-run manual tests.
+- Re-analyze output for `[DEBUG]` messages.

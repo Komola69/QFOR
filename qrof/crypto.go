@@ -67,5 +67,9 @@ func SignData(priv ed25519.PrivateKey, message []byte) []byte {
 }
 
 func VerifySignature(pub ed25519.PublicKey, message, sig []byte) bool {
-	return ed25519.Verify(pub, message, sig)
+	valid := ed25519.Verify(pub, message, sig)
+	if !valid {
+		fmt.Println("[DEBUG] Signature verification FAILED")
+	}
+	return valid
 }
