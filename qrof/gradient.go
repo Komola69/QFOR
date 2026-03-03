@@ -1,6 +1,7 @@
 package qrof
 
 import (
+	"fmt"
 	"math"
 	"sync"
 	"time"
@@ -10,7 +11,8 @@ const (
 	gradientPotentialThreshold = 1.0
 	gradientDecayTick          = 1 * time.Second
 	gradientHalfLifeSeconds    = 10.0
-	gradientMinWeight          = 1e-6
+	gradientWeightCap          = 2.0
+	gradientEvictionWeight     = 0.1
 )
 
 type OIDEntry struct {
@@ -57,6 +59,9 @@ func (g *GradientTable) UpdateGradient(oid [32]byte, signalStrength float64) {
 		entry.Potential = signalStrength
 	}
 	entry.Weight += 1.0
+	if entry.Weight > gradientWeightCap {
+		entry.Weight = gradientWeightCap
+	}
 	entry.LastSeen = now
 	g.entries[oid] = entry
 }
@@ -69,7 +74,7 @@ func (g *GradientTable) GetBestInterface(oid [32]byte) bool {
 	if !ok {
 		return false
 	}
-	return entry.Potential < gradientPotentialThreshold && entry.Weight > gradientMinWeight
+	return entry.Potential < gradientPotentialThreshold && entry.Weight > gradientEvictionWeight
 }
 
 func (g *GradientTable) DecayLoop() {
@@ -84,16 +89,30 @@ func (g *GradientTable) DecayLoop() {
 				lastTick = now
 				decayFactor := math.Exp(-math.Ln2 * elapsedSeconds / gradientHalfLifeSeconds)
 
+				evicted := make([][32]byte, 0)
 				g.mu.Lock()
 				for oid, entry := range g.entries {
 					entry.Weight *= decayFactor
-					if entry.Weight < gradientMinWeight {
+					if entry.Weight < gradientEvictionWeight {
 						delete(g.entries, oid)
+						evicted = append(evicted, oid)
 						continue
 					}
 					g.entries[oid] = entry
 				}
 				g.mu.Unlock()
+
+				if len(evicted) > 0 {
+					g.pitMu.Lock()
+					for _, oid := range evicted {
+						delete(g.pit, oid)
+					}
+					g.pitMu.Unlock()
+
+					for _, oid := range evicted {
+						fmt.Printf("!!! EVICTED: %x\n", oid[:4])
+					}
+				}
 			}
 		}()
 	})

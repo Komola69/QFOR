@@ -69,8 +69,8 @@ func runReceiver(difficulty uint32) error {
 		defer ticker.Stop()
 		for range ticker.C {
 			netPPS := atomic.SwapUint64(&pps, 0)
-			verified := atomic.LoadUint64(&verifiedPackets)
-			verifyNS := atomic.LoadInt64(&totalVerifyNS)
+			verified := atomic.SwapUint64(&verifiedPackets, 0)
+			verifyNS := atomic.SwapInt64(&totalVerifyNS, 0)
 
 			var eer float64
 			if verifyNS > 0 {
