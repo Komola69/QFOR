@@ -25,6 +25,7 @@ Last updated: 2026-03-04
   - `Interest` (`FrameTypeInterest`)
   - `Data` (`FrameTypeData`) with strict parser-based decode:
     - **Upgraded to Protocol Version 0x02.**
+    - **Beacon (v0x02, 100 bytes):** `[Preamble 2][Type 1][Version 1][OID 32][ObjectNonce 16][LeafHash 32][Potential 8][Epoch 4][PoW 4]`.
     - **InterestPacket (v0x02, 90 bytes):** `[Preamble 2][Type 1][Version 1][OID 32][ObjectNonce 16][ChunkIndex 2][Nonce 4][SaltedPoD 32]`.
     - **DataPacket (v0x02, 90 bytes min):** `[Preamble 2][Type 1][Version 1][OID 32][ObjectNonce 16][PubKey 32][ChunkIndex 2][TotalChunks 2][SigLen 2][Sig][PayloadLen 2][Payload]`.
     - **Strict Version Gating:** Packets with Version != 0x02 are dropped by parsers.
@@ -34,7 +35,7 @@ Last updated: 2026-03-04
   - Beacon PoW solve/verify
   - Discovery PoW verify (`VerifyDiscoveryPoW`)
   - Namespace hash derivation (`DeriveNamespace`)
-  - Data packet builder (**`CraftDataPacket`**) now supports Protocol Version 0x02 and `ObjectNonce`.
+  - Data packet builder (**`CraftDataPacket`**) supports Protocol Version 0x02 and `ObjectNonce`.
 - Identity/signature in `qrof/crypto.go`:
   - persistent identity loader/generator (`LoadOrGenerateIdentity`)
   - **Self-certifying OID derivation upgraded to Object-Centric Identity: `DeriveOID(pub, objectNonce) = Hash(pub || objectNonce)`.**
@@ -53,18 +54,16 @@ Last updated: 2026-03-04
   - dormant promotion on valid PoD
   - fixed-window PPS/EER telemetry via atomic swaps
   - loads/saves receiver identity from `receiver_identity.key`
-  - **Identity Fork Phase 3 Applied:** Uses Object-routed OID for authentication. Computes `authenticOID` with a local `ObjectNonce`.
-  - broadcasts beacons with authentic OID + rolling leaf hash challenge.
-  - **Verifies Interest OID using the provided `ObjectNonce` from the packet.**
+  - **Identity Fork Alignment Complete:** Uses stable `serviceNonce` for object instance identity.
+  - broadcasts beacons with v0.2 layout including `ObjectNonce`.
+  - **Verifies Interest OID using the provided `ObjectNonce` and ensures it matches the local `serviceNonce`.**
 - Sender behavior (`runSender`):
   - namespace ingress gate on incoming beacons
-  - explicit ingress telemetry counters/logs:
-    - `[INGRESS] Alien beacon dropped. Drops: N`
-    - `[INGRESS] Valid beacon accepted. Accepts: N`
-  - **Generates a random `ObjectNonce` per Interest.**
+  - **Captures `ObjectNonce` from Beacon and uses it for Interest.**
 - Promote test behavior (`runPromoteTest`):
   - **Upgraded to v1.1 Identity Law.**
-  - **Generates random `ObjectNonce` for Interest.**
+  - **Captures `ObjectNonce` from Beacon.**
+  - **Uses captured `ObjectNonce` for Interest construction.**
   - **Verifies received `DataPacket` OID using its `ObjectNonce` and `PubKey`.**
   - **Binds `Version` in signature verification.**
 
@@ -73,16 +72,15 @@ Last updated: 2026-03-04
 - Local tests:
   - `go test ./...` passed (no tests in current package)
 - Manual multi-host tests (from user logs):
-  - v1.0 validated. **v1.1 (Identity Fork) ready for manual verification.**
+  - **v1.1 (Identity Fork) ready for manual verification.**
 
 ## Latest Status Sync (2026-03-04, Identity Fork Complete)
 - Applied:
-  - `qrof/packet.go`: v0.2 Wire Schema.
+  - `qrof/packet.go`: v0.2 Wire Schema for all packet types including Beacon.
   - `qrof/crypto.go`: v1.1 Identity Law (Object-routed OID + Versioned Signatures).
-  - `qrof/economy.go`: Updated `CraftDataPacket` to v1.1.
-  - `main.go`: Full application-level alignment with v1.1 Identity Law.
-- Conclusion: The system has successfully transitioned from producer-centric to object-centric identity. The OID now commits to both the producer and a specific object instance via a random `ObjectNonce`.
+  - `main.go`: Full application-level alignment. Requester now discovers `ObjectNonce` from Beacons.
+- Conclusion: The Identity Fork is now architecturally and application-consistent. Discovery, Interest construction, and OID verification are fully object-centric.
 
 ## Next Action Required
-- Manual verification on 2 laptops to confirm the new `promote_test` flow.
+- Manual verification on 2 laptops to confirm the new `promote_test` flow works with discoverable `ObjectNonce`.
 - Proceed to Path A Phase 3: Reassembly layer implementation.

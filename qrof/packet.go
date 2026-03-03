@@ -24,7 +24,7 @@ const (
 )
 
 const (
-	beaconFrameLen   = 2 + 1 + 32 + 32 + 8 + 4 + 4
+	beaconFrameLen   = 2 + 1 + 1 + 32 + 16 + 32 + 8 + 4 + 4
 	interestFrameLen = 2 + 1 + 1 + 32 + 16 + 2 + 4 + 32
 	dataFrameMinLen  = 2 + 1 + 1 + 32 + 16 + 32 + 2 + 2 + 2
 )
@@ -41,11 +41,13 @@ type QROFPacket struct {
 }
 
 type Beacon struct {
-	OID       [32]byte
-	LeafHash  [32]byte
-	Potential float64
-	Epoch     uint32
-	PoW       uint32
+	Version     uint8
+	OID         [32]byte
+	ObjectNonce [16]byte
+	LeafHash    [32]byte
+	Potential   float64
+	Epoch       uint32
+	PoW         uint32
 }
 
 type DemandCapsule struct {
@@ -107,11 +109,17 @@ func (b Beacon) Serialize() []byte {
 	frame := make([]byte, beaconFrameLen)
 	copy(frame[0:2], defaultPreamble[:])
 	frame[2] = FrameTypeBeacon
-	copy(frame[3:35], b.OID[:])
-	copy(frame[35:67], b.LeafHash[:])
-	binary.BigEndian.PutUint64(frame[67:75], math.Float64bits(b.Potential))
-	binary.BigEndian.PutUint32(frame[75:79], b.Epoch)
-	binary.BigEndian.PutUint32(frame[79:83], b.PoW)
+	version := b.Version
+	if version == 0 {
+		version = ProtocolVersion
+	}
+	frame[3] = version
+	copy(frame[4:36], b.OID[:])
+	copy(frame[36:52], b.ObjectNonce[:])
+	copy(frame[52:84], b.LeafHash[:])
+	binary.BigEndian.PutUint64(frame[84:92], math.Float64bits(b.Potential))
+	binary.BigEndian.PutUint32(frame[92:96], b.Epoch)
+	binary.BigEndian.PutUint32(frame[96:100], b.PoW)
 	return frame
 }
 
@@ -123,12 +131,17 @@ func ParseBeacon(frame []byte) (Beacon, bool) {
 	if frame[0] != qrofPreamble0 || frame[1] != qrofPreamble1 || frame[2] != FrameTypeBeacon {
 		return b, false
 	}
+	if frame[3] != ProtocolVersion {
+		return b, false
+	}
 
-	copy(b.OID[:], frame[3:35])
-	copy(b.LeafHash[:], frame[35:67])
-	b.Potential = math.Float64frombits(binary.BigEndian.Uint64(frame[67:75]))
-	b.Epoch = binary.BigEndian.Uint32(frame[75:79])
-	b.PoW = binary.BigEndian.Uint32(frame[79:83])
+	b.Version = frame[3]
+	copy(b.OID[:], frame[4:36])
+	copy(b.ObjectNonce[:], frame[36:52])
+	copy(b.LeafHash[:], frame[52:84])
+	b.Potential = math.Float64frombits(binary.BigEndian.Uint64(frame[84:92]))
+	b.Epoch = binary.BigEndian.Uint32(frame[92:96])
+	b.PoW = binary.BigEndian.Uint32(frame[96:100])
 	return b, true
 }
 

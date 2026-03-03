@@ -77,9 +77,9 @@ func runReceiver(difficulty uint32, namespace string) error {
 		return fmt.Errorf("load/generate receiver identity: %w", err)
 	}
 
-	var receiverObjectNonce [16]byte
-	mustRead(receiverObjectNonce[:])
-	authenticOID := qrof.DeriveOID(pub, receiverObjectNonce)
+	var serviceNonce [16]byte
+	mustRead(serviceNonce[:])
+	authenticOID := qrof.DeriveOID(pub, serviceNonce)
 
 	fmt.Printf("Receiver Authentic OID: %x\n", authenticOID)
 	var salts leafWindow
@@ -112,10 +112,12 @@ func runReceiver(difficulty uint32, namespace string) error {
 			var leaf [32]byte
 			mustRead(leaf[:])
 			beacon := qrof.Beacon{
-				OID:       authenticOID,
-				LeafHash:  leaf,
-				Potential: 0.5,
-				Epoch:     uint32(time.Now().Unix()),
+				Version:     qrof.ProtocolVersion,
+				OID:         authenticOID,
+				ObjectNonce: serviceNonce,
+				LeafHash:    leaf,
+				Potential:   0.5,
+				Epoch:       uint32(time.Now().Unix()),
 			}
 			beacon.PoW = qrof.SolveBeaconPoW(beacon, qrof.DifficultyInterest)
 			rotateSaltWindow(&salts, beacon.LeafHash)
@@ -165,6 +167,10 @@ func runReceiver(difficulty uint32, namespace string) error {
 			}
 
 			// Verify Object-routed identity: OID must match pubkey + objectNonce from interest
+			// and must match our stable service object instance.
+			if interest.ObjectNonce != serviceNonce {
+				continue
+			}
 			computedOID := qrof.DeriveOID(pub, interest.ObjectNonce)
 			if computedOID != oid {
 				// We don't own this object instance
@@ -290,14 +296,12 @@ func runSender(target string, difficulty uint32, namespace string) error {
 
 		salt := qrof.DeriveSalt(beacon.LeafHash, beacon.OID)
 
-		var objNonce [16]byte
-		mustRead(objNonce[:])
 		capsule := qrof.SolveA_PoD(beacon.OID, 0, 1, salt, difficulty)
 
 		interest := qrof.InterestPacket{
 			Version:     qrof.ProtocolVersion,
 			ChunkIndex:  0,
-			ObjectNonce: objNonce,
+			ObjectNonce: beacon.ObjectNonce,
 			DemandCapsule: capsule,
 		}
 
@@ -388,13 +392,10 @@ func runPull(target string, oidHex string, difficulty uint32, namespace string) 
 		salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
 		capsule := qrof.SolveA_PoD(targetOID, 0, 1, salt, difficulty)
 
-		var objNonce [16]byte
-		mustRead(objNonce[:])
-
 		interest := qrof.InterestPacket{
 			Version:     qrof.ProtocolVersion,
 			ChunkIndex:  0,
-			ObjectNonce: objNonce,
+			ObjectNonce: beacon.ObjectNonce,
 			DemandCapsule: capsule,
 		}
 
@@ -467,13 +468,10 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 	salt := qrof.DeriveSalt(beacon.LeafHash, targetOID)
 	capsule := qrof.SolveA_PoD(targetOID, 0, 1, salt, difficulty)
 
-	var objNonce [16]byte
-	mustRead(objNonce[:])
-
 	interest := qrof.InterestPacket{
 		Version:     qrof.ProtocolVersion,
 		ChunkIndex:  0,
-		ObjectNonce: objNonce,
+		ObjectNonce: beacon.ObjectNonce,
 		DemandCapsule: capsule,
 	}
 
@@ -528,15 +526,19 @@ func runPromoteTest(target string, oidHex string, difficulty uint32, namespace s
 
 func randomBeacon() qrof.Beacon {
 	var oid [32]byte
+	var nonce [16]byte
 	var leaf [32]byte
 	mustRead(oid[:])
+	mustRead(nonce[:])
 	mustRead(leaf[:])
 
 	return qrof.Beacon{
-		OID:       oid,
-		LeafHash:  leaf,
-		Potential: 0.5,
-		Epoch:     uint32(time.Now().Unix()),
+		Version:     qrof.ProtocolVersion,
+		OID:         oid,
+		ObjectNonce: nonce,
+		LeafHash:    leaf,
+		Potential:   0.5,
+		Epoch:       uint32(time.Now().Unix()),
 	}
 }
 
